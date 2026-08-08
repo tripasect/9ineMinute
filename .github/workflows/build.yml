@@ -50,8 +50,8 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           brew install libraqm
-          # Find and copy fribidi dylib (name can vary)
-          cp $(find $(brew --prefix fribidi) -name "libfribidi*.dylib" | head -n 1) libfribidi.dylib
+          # Copy fribidi dylib directly from known location
+          cp "$(brew --prefix fribidi)/lib/libfribidi.0.dylib" libfribidi.dylib
 
       - name: Install dependencies
         run: |
