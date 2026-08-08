@@ -43,14 +43,15 @@ jobs:
 
       - name: Stage Windows FriBiDi runtime DLL
         if: matrix.os == 'windows-latest'
-        run: copy-item C:\\msys64\\mingw64\\bin\\libfribidi-0.dll .
-        shell: pwsh
+        run: cp /mingw64/bin/libfribidi-0.dll .
+        shell: msys2 {0}
 
       - name: Install macOS text-rendering dependency
         if: matrix.os == 'macos-latest'
         run: |
           brew install libraqm
-          cp "$(brew --prefix fribidi)/lib/libfribidi.0.dylib" libfribidi.dylib
+          # Find and copy fribidi dylib (name can vary)
+          cp $(find $(brew --prefix fribidi) -name "libfribidi*.dylib" | head -n 1) libfribidi.dylib
 
       - name: Install dependencies
         run: |
