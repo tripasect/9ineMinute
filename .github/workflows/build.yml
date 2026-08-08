@@ -2,8 +2,8 @@ name: Build Binaries
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -24,62 +24,85 @@ jobs:
             # For simplicity, we'll try to use a more reliable static build link if possible.
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install -r requirements-build.txt
+      - name: Set up FriBiDi for Windows native RTL text
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-fribidi
 
-    - name: Download FFmpeg (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        curl -L -o ffmpeg.zip ${{ matrix.ffmpeg_url }}
-        expand-archive ffmpeg.zip .
-        copy-item ${{ matrix.ffmpeg_bin_dir }}/ffmpeg.exe .
-        copy-item ${{ matrix.ffmpeg_bin_dir }}/ffplay.exe .
-        copy-item ${{ matrix.ffmpeg_bin_dir }}/ffprobe.exe .
-      shell: pwsh
+      - name: Stage Windows FriBiDi runtime DLL
+        if: matrix.os == 'windows-latest'
+        run: copy-item C:\\msys64\\mingw64\\bin\\libfribidi-0.dll .
+        shell: pwsh
 
-    - name: Download FFmpeg (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        # Download static binaries for macOS
-        curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip
-        curl -L -o ffplay.zip https://evermeet.cx/ffmpeg/getrelease/ffplay/zip
-        curl -L -o ffprobe.zip https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip
-        unzip -o ffmpeg.zip
-        unzip -o ffplay.zip
-        unzip -o ffprobe.zip
-        chmod +x ffmpeg ffplay ffprobe
+      - name: Install macOS text-rendering dependency
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install libraqm
+          cp "$(brew --prefix fribidi)/lib/libfribidi.0.dylib" libfribidi.dylib
 
-    - name: Build with PyInstaller
-      run: |
-        pyinstaller build.spec
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-build.txt
 
-    - name: Prepare Artifact (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        mv dist/9ineMinuteEnglish.exe ${{ matrix.artifact_name }}
+      - name: Download FFmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          curl -L -o ffmpeg.zip ${{ matrix.ffmpeg_url }}
+          expand-archive ffmpeg.zip .
+          copy-item ${{ matrix.ffmpeg_bin_dir }}/ffmpeg.exe .
+          copy-item ${{ matrix.ffmpeg_bin_dir }}/ffplay.exe .
+          copy-item ${{ matrix.ffmpeg_bin_dir }}/ffprobe.exe .
+        shell: pwsh
 
-    - name: Prepare Artifact (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        # For macOS, we provide both the raw binary and the .app bundle (zipped)
-        mv dist/9ineMinuteEnglish ${{ matrix.artifact_name }}
-        cd dist && zip -r ../9ineMinuteEnglish-macOS-App.zip 9ineMinuteEnglish.app
+      - name: Download FFmpeg (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          # Download static binaries for macOS
+          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip
+          curl -L -o ffplay.zip https://evermeet.cx/ffmpeg/getrelease/ffplay/zip
+          curl -L -o ffprobe.zip https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip
+          unzip -o ffmpeg.zip
+          unzip -o ffplay.zip
+          unzip -o ffprobe.zip
+          chmod +x ffmpeg ffplay ffprobe
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: |
-          ${{ matrix.artifact_name }}
-          9ineMinuteEnglish-macOS-App.zip
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller build.spec
+
+      - name: Verify frozen native RTL rendering (Windows)
+        if: matrix.os == 'windows-latest'
+        run: .\\dist\\9ineMinuteEnglish.exe --verify-raqm
+        shell: pwsh
+
+      - name: Prepare Artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mv dist/9ineMinuteEnglish.exe ${{ matrix.artifact_name }}
+
+      - name: Prepare Artifact (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          # For macOS, we provide both the raw binary and the .app bundle (zipped)
+          mv dist/9ineMinuteEnglish ${{ matrix.artifact_name }}
+          cd dist && zip -r ../9ineMinuteEnglish-macOS-App.zip 9ineMinuteEnglish.app
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}
+            9ineMinuteEnglish-macOS-App.zip

@@ -1,17 +1,19 @@
-import os
 import math
+import os
 import subprocess
+import sys
 import textwrap
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
 from PIL import Image, ImageDraw, ImageFont
 
-from config import VIDEO_SETTINGS, LANGUAGES, BASE_DIR, OUTPUT_DIR, TEMP_DIR
-from runtime import resolve_binary
+from config import BASE_DIR, LANGUAGES, OUTPUT_DIR, TEMP_DIR, VIDEO_SETTINGS
+from runtime import bundle_dir, resolve_binary
 
 
 class VideoMuxer:
     """Handles high-performance video generation with animated wave backgrounds and smooth transitions using FFmpeg pipes."""
-    
+
     def __init__(self, settings: dict = None):
         merged = dict(VIDEO_SETTINGS)
         if settings:
@@ -26,9 +28,13 @@ class VideoMuxer:
         os.makedirs(self.temp_dir, exist_ok=True)
 
         # Preload background image and watermark once (if configured)
-        self._background_image = self._load_background_image(merged.get("background_image"))
+        self._background_image = self._load_background_image(
+            merged.get("background_image")
+        )
         self._watermark = self._load_watermark(merged.get("watermark"))
-        self._channel_handle = merged.get("channel_handle", "YouTube.com/@9ineMinuteEnglish")
+        self._channel_handle = merged.get(
+            "channel_handle", "YouTube.com/@9ineMinuteEnglish"
+        )
 
     def update_settings(self, settings: dict):
         """Merge new settings at runtime and reload any affected assets."""
@@ -38,8 +44,14 @@ class VideoMuxer:
             self.height = int(self.settings.get("height", 1080))
         if "fps" in settings:
             self.fps = int(self.settings.get("fps", 25))
-        if "background_image" in settings or "width" in settings or "height" in settings:
-            self._background_image = self._load_background_image(self.settings.get("background_image"))
+        if (
+            "background_image" in settings
+            or "width" in settings
+            or "height" in settings
+        ):
+            self._background_image = self._load_background_image(
+                self.settings.get("background_image")
+            )
         if "watermark" in settings:
             self._watermark = self._load_watermark(self.settings.get("watermark"))
         if "channel_handle" in settings:
@@ -55,7 +67,13 @@ class VideoMuxer:
         if os.path.exists(path):
             return path
         abs_path = os.path.join(BASE_DIR, path)
-        return abs_path if os.path.exists(abs_path) else None
+        if os.path.exists(abs_path):
+            return abs_path
+        # Bundled default assets (watermark.png, background-music.mp3) live
+        # in the read-only bundle directory in frozen builds, not BASE_DIR
+        # (which is a writable per-user app-data directory there).
+        bundled_path = os.path.join(bundle_dir(), os.path.basename(path))
+        return bundled_path if os.path.exists(bundled_path) else None
 
     def _load_background_image(self, path) -> Optional[Image.Image]:
         resolved = self._resolve_path(path)
@@ -83,26 +101,57 @@ class VideoMuxer:
     def _resolve_font(self, lang_code: str, size: int):
         cfg = LANGUAGES.get(lang_code, {})
         candidates = [cfg.get("font")] if cfg.get("font") else []
-        candidates += [
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        ]
+        if sys.platform == "win32":
+            # Tahoma ships with supported Windows releases and covers Arabic
+            # and Persian. It is the primary cross-platform fallback when
+            # the macOS-specific paths in LANGUAGES are unavailable.
+            candidates += [
+                r"C:\\Windows\\Fonts\\tahoma.ttf",
+                r"C:\\Windows\\Fonts\\segoeui.ttf",
+                r"C:\\Windows\\Fonts\\arial.ttf",
+            ]
+        elif sys.platform == "darwin":
+            candidates += [
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            ]
+        else:
+            candidates += [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            ]
         for path in candidates:
-            if path and os.path.exists(path):
+            if not path:
+                continue
+            # Configured bundled assets are extracted into bundle_dir() in
+            # PyInstaller onefile builds; a relative filename is therefore
+            # resolved there after direct/absolute candidates.
+            resolved = path
+            if not os.path.exists(resolved) and not os.path.isabs(path):
+                bundled = os.path.join(bundle_dir(), path)
+                if os.path.exists(bundled):
+                    resolved = bundled
+            if os.path.exists(resolved):
                 try:
-                    return ImageFont.truetype(path, size)
+                    return ImageFont.truetype(resolved, size)
                 except Exception:
                     continue
         return ImageFont.load_default()
-    
+
     def get_audio_duration(self, file_path: str) -> float:
         """Get the duration of an audio file using ffprobe."""
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             return 3.0  # Fallback duration for missing/empty audio
-            
+
         cmd = [
-            resolve_binary("ffprobe"), "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            resolve_binary("ffprobe"),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -111,7 +160,9 @@ class VideoMuxer:
             print(f"  [Warning] Failed to get duration for {file_path}: {e}")
             return 3.0
 
-    def draw_calming_waves(self, draw: ImageDraw.Draw, current_frame_global: int, total_frames_global: int):
+    def draw_calming_waves(
+        self, draw: ImageDraw.Draw, current_frame_global: int, total_frames_global: int
+    ):
         """Draws two overlapping, beautiful, and slowly moving waves at the bottom of the canvas."""
         wave_colors = self.settings.get("wave_colors", [(30, 40, 60), (36, 50, 75)])
         w, h = self.width, self.height
@@ -119,7 +170,9 @@ class VideoMuxer:
 
         # Wave 1 (Deep Indigo-Blue, translucent)
         points1 = []
-        wave_cycles_global = 12  # How many times the wave repeats its pattern over the entire video
+        wave_cycles_global = (
+            12  # How many times the wave repeats its pattern over the entire video
+        )
         phase1 = (current_frame_global / safe_total) * 2 * math.pi * wave_cycles_global
 
         for x in range(0, w + 1, 20):
@@ -131,7 +184,9 @@ class VideoMuxer:
         # Wave 2 (Lighter Teal-Blue, translucent, moving in opposition)
         points2 = []
         wave_cycles_global_2 = 3.5  # Slightly different cycle for the second wave
-        phase2 = (current_frame_global / safe_total) * 2 * math.pi * wave_cycles_global_2 + 1.5  # Offset phase
+        phase2 = (
+            current_frame_global / safe_total
+        ) * 2 * math.pi * wave_cycles_global_2 + 1.5  # Offset phase
 
         for x in range(0, w + 1, 20):
             y = (h - 170) + 25 * math.sin(0.004 * (w / 1920) * x + phase2)
@@ -154,7 +209,7 @@ class VideoMuxer:
         audio_duration_frames: int,
         current_frame_global: int,
         total_frames_global: int,
-        keep_text_visible: bool = False
+        keep_text_visible: bool = False,
     ) -> Image.Image:
         """Generates a single frame with text (fades in at clip edges) and moving waves or a background image."""
         bg_color = self.settings.get("background_color", (10, 11, 16))
@@ -174,7 +229,10 @@ class VideoMuxer:
         if self._watermark is not None:
             img.paste(
                 self._watermark,
-                (w - margin - self._watermark.width, h - margin - self._watermark.height),
+                (
+                    w - margin - self._watermark.width,
+                    h - margin - self._watermark.height,
+                ),
                 self._watermark,
             )
 
@@ -182,17 +240,22 @@ class VideoMuxer:
         try:
             handle_font = ImageFont.truetype(
                 "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-                max(16, int(22 * h / 1080))
+                max(16, int(22 * h / 1080)),
             )
         except Exception:
             handle_font = ImageFont.load_default()
         draw.text(
-            (margin, h - margin), self._channel_handle,
-            fill=(180, 180, 180, 120), font=handle_font, anchor="ld"
+            (margin, h - margin),
+            self._channel_handle,
+            fill=(180, 180, 180, 120),
+            font=handle_font,
+            anchor="ld",
         )
 
         # Text fades in over the first `fade_duration` seconds
-        fade_duration_frames = max(1, int(self.fps * self.settings.get("fade_duration", 0.5)))
+        fade_duration_frames = max(
+            1, int(self.fps * self.settings.get("fade_duration", 0.5))
+        )
         if frame_idx_in_clip < fade_duration_frames:
             alpha = int(255 * (frame_idx_in_clip / fade_duration_frames))
         else:
@@ -212,8 +275,12 @@ class VideoMuxer:
             wrap_width = 35 if is_rtl else 42
             return textwrap.wrap(text, width=wrap_width)
 
-        font_primary = self._resolve_font(primary_lang, _font_size(primary_lang, 88, 68))
-        font_secondary = self._resolve_font(secondary_lang, _font_size(secondary_lang, 70, 53))
+        font_primary = self._resolve_font(
+            primary_lang, _font_size(primary_lang, 88, 68)
+        )
+        font_secondary = self._resolve_font(
+            secondary_lang, _font_size(secondary_lang, 70, 53)
+        )
 
         primary_lines = prepare_text_lines(primary_text, primary_lang)
         secondary_lines = prepare_text_lines(secondary_text, secondary_lang)
@@ -236,16 +303,20 @@ class VideoMuxer:
 
         start_y = (h - total_height) // 2
 
-        # Draw primary text lines with perfect centering and native RTL support
+        # Draw primary text lines with Pillow's native RAQM renderer. RAQM
+        # performs correct Arabic/Persian shaping, bidi ordering and kerning.
         y = start_y
         for line in primary_lines:
-            dir_str = "rtl" if LANGUAGES.get(primary_lang, {}).get("direction") == "rtl" else "ltr"
+            dir_str = (
+                "rtl"
+                if LANGUAGES.get(primary_lang, {}).get("direction") == "rtl"
+                else "ltr"
+            )
             bbox = draw.textbbox((0, 0), line, font=font_primary, direction=dir_str)
             text_width = bbox[2] - bbox[0]
             x = (w - text_width) // 2
             draw.text(
-                (x, y), line, fill=fill_primary, font=font_primary,
-                direction=dir_str
+                (x, y), line, fill=fill_primary, font=font_primary, direction=dir_str
             )
             y += line_height_primary
 
@@ -253,13 +324,22 @@ class VideoMuxer:
         if secondary_lines:
             y += gap
             for line in secondary_lines:
-                dir_str = "rtl" if LANGUAGES.get(secondary_lang, {}).get("direction") == "rtl" else "ltr"
-                bbox = draw.textbbox((0, 0), line, font=font_secondary, direction=dir_str)
+                dir_str = (
+                    "rtl"
+                    if LANGUAGES.get(secondary_lang, {}).get("direction") == "rtl"
+                    else "ltr"
+                )
+                bbox = draw.textbbox(
+                    (0, 0), line, font=font_secondary, direction=dir_str
+                )
                 text_width = bbox[2] - bbox[0]
                 x = (w - text_width) // 2
                 draw.text(
-                    (x, y), line, fill=fill_secondary, font=font_secondary,
-                    direction=dir_str
+                    (x, y),
+                    line,
+                    fill=fill_secondary,
+                    font=font_secondary,
+                    direction=dir_str,
                 )
                 y += line_height_secondary
 
@@ -276,7 +356,7 @@ class VideoMuxer:
         output_path: str,
         current_frame_global_offset: int,
         total_frames_global: int,
-        keep_text_visible: bool = False
+        keep_text_visible: bool = False,
     ) -> bool:
         """
         Creates a high-quality video clip using FFmpeg stdin pipe without deadlocks.
@@ -288,10 +368,14 @@ class VideoMuxer:
         audio_dur = self.get_audio_duration(audio_path)
         audio_duration_frames = int(audio_dur * fps)
 
-        use_silent_audio = not (os.path.exists(audio_path) and os.path.getsize(audio_path) > 0)
-        
+        use_silent_audio = not (
+            os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
+        )
+
         if use_silent_audio:
-            print(f"  [Warning] Audio file {audio_path} is missing or empty, using silent audio.")
+            print(
+                f"  [Warning] Audio file {audio_path} is missing or empty, using silent audio."
+            )
             audio_source_cmd = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono"]
             audio_map = "-map", "1:a"
             filter_complex_str = ""
@@ -303,42 +387,71 @@ class VideoMuxer:
             filter_complex_str = f"[1:a]apad,aresample=44100,afade=t=in:st=0:d={fade_dur},afade=t=out:st={fade_out_start:.3f}:d={fade_dur}[outa]"
 
         cmd = [
-            resolve_binary("ffmpeg"), "-y",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.width}x{self.height}", "-r", str(fps),
-            "-i", "-",
+            resolve_binary("ffmpeg"),
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
             *audio_source_cmd,
-            *([ "-filter_complex", filter_complex_str ] if filter_complex_str else []),
-            "-map", "0:v", *audio_map,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-            "-c:a", "pcm_s16le", "-ar", "44100",
-            "-pix_fmt", "yuv420p",
-            "-t", f"{total_duration:.2f}", # Use -t for duration instead of -shortest
-            output_path
+            *(["-filter_complex", filter_complex_str] if filter_complex_str else []),
+            "-map",
+            "0:v",
+            *audio_map,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            "44100",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+            f"{total_duration:.2f}",  # Use -t for duration instead of -shortest
+            output_path,
         ]
-        
+
         try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
-            
+
             # Write frames directly to pipe
             for f_idx_in_clip in range(total_frames_in_clip):
                 current_frame_global = current_frame_global_offset + f_idx_in_clip
                 img = self.create_frame_image_in_memory(
-                    primary_text, secondary_text, primary_lang, secondary_lang,
-                    f_idx_in_clip, total_frames_in_clip, audio_duration_frames,
-                    current_frame_global, total_frames_global,
-                    keep_text_visible=keep_text_visible
+                    primary_text,
+                    secondary_text,
+                    primary_lang,
+                    secondary_lang,
+                    f_idx_in_clip,
+                    total_frames_in_clip,
+                    audio_duration_frames,
+                    current_frame_global,
+                    total_frames_global,
+                    keep_text_visible=keep_text_visible,
                 )
                 try:
                     process.stdin.write(img.tobytes())
                 except BrokenPipeError:
-                    print(f"  [Warning] Broken pipe detected during frame write. FFmpeg process might have terminated early.")
-                    break # Exit loop if pipe is broken
-                
+                    print(
+                        f"  [Warning] Broken pipe detected during frame write. FFmpeg process might have terminated early."
+                    )
+                    break  # Exit loop if pipe is broken
+
             process.stdin.close()
             process.wait()
             return process.returncode == 0
@@ -346,44 +459,82 @@ class VideoMuxer:
             print(f"  [Error] Failed to pipe video clip: {e}")
             return False
 
-    def create_silence_clip(self, duration: float, output_path: str,
-                            current_frame_global_offset: int, total_frames_global: int) -> bool:
+    def create_silence_clip(
+        self,
+        duration: float,
+        output_path: str,
+        current_frame_global_offset: int,
+        total_frames_global: int,
+    ) -> bool:
         """
         Creates a smooth transitions/silence gap clip with slowly moving waves and absolute silence.
         No text or text fading is applied.
         """
         fps = self.fps
         total_frames_in_clip = int(duration * fps)
-        
+
         cmd = [
-            resolve_binary("ffmpeg"), "-y",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.width}x{self.height}", "-r", str(fps),
-            "-i", "-",
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
-            "-map", "0:v", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-            "-c:a", "pcm_s16le", "-ar", "44100",
-            "-pix_fmt", "yuv420p",
-            "-t", f"{duration:.2f}",
-            output_path
+            resolve_binary("ffmpeg"),
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{self.width}x{self.height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            "44100",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+            f"{duration:.2f}",
+            output_path,
         ]
-        
+
         try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
-            
+
             # Write frames, passing global frame info for continuous wave animation
             for f_idx_in_clip in range(total_frames_in_clip):
                 current_frame_global = current_frame_global_offset + f_idx_in_clip
-                img = self.create_frame_image_in_memory("", "", "en", "fa",
-                                                        f_idx_in_clip, total_frames_in_clip, 0,
-                                                        current_frame_global, total_frames_global)
+                img = self.create_frame_image_in_memory(
+                    "",
+                    "",
+                    "en",
+                    "fa",
+                    f_idx_in_clip,
+                    total_frames_in_clip,
+                    0,
+                    current_frame_global,
+                    total_frames_global,
+                )
                 process.stdin.write(img.tobytes())
-                
+
             process.stdin.close()
             process.wait()
             return process.returncode == 0
@@ -393,8 +544,14 @@ class VideoMuxer:
 
     def _get_duration(self, file_path: str) -> float:
         cmd = [
-            resolve_binary("ffprobe"), "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            resolve_binary("ffprobe"),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -406,16 +563,16 @@ class VideoMuxer:
         self,
         clip_paths: List[str],
         ambient_audio: str = None,
-        output_filename: str = "final_video.mp4"
+        output_filename: str = "final_video.mp4",
     ) -> str:
         """
         Concatenates all clip files using the ultra-fast copy demuxer,
         then re-encodes audio to apply global fade-in/out.
         """
         # When concatenating MP3/AAC via concat demuxer, audio pops can happen.
-        # It's better to re-encode the audio streams together without 'copy' demuxing them, 
-        # but since we already rendered them as AAC into the final clips, we can apply an 
-        # aresample filter or crossfade to fix the glitches. But the simplest way is 
+        # It's better to re-encode the audio streams together without 'copy' demuxing them,
+        # but since we already rendered them as AAC into the final clips, we can apply an
+        # aresample filter or crossfade to fix the glitches. But the simplest way is
         # to ensure the individual clip generation properly padded the audio and encoded it perfectly.
         # Actually, let's just make sure the audio in create_clip is padded by 0.05 on the afade.
         concat_list_path = os.path.join(self.temp_dir, "concat_list.txt")
@@ -428,20 +585,31 @@ class VideoMuxer:
                 f.write(f"file '{escaped_path}'\n")
 
         print(f"  [Muxer] Concatenating {len(clip_paths)} clips...")
-        
+
         # We re-encode audio here instead of copy, to prevent STT pops between clips.
         # The copy demuxer is fine for video since we used same codec/params.
         # Actually since we set -ar 44100 on all clips uniformly, maybe concat works better?
         # A safer option to eliminate pop is re-encoding audio with a tiny crossfade or simply re-encoding.
         concat_cmd = [
-            resolve_binary("ffmpeg"), "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list_path,
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-            temp_merged_video
+            resolve_binary("ffmpeg"),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_path,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            temp_merged_video,
         ]
-        
+
         try:
             subprocess.run(concat_cmd, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as e:
@@ -463,7 +631,14 @@ class VideoMuxer:
                 f"[1:a]volume={bg_volume}[bg];"
                 f"[speech][bg]amix=inputs=2:duration=first:dropout_transition=0.5[outa]"
             )
-            inputs = ["-i", temp_merged_video, "-stream_loop", "-1", "-i", ambient_audio]
+            inputs = [
+                "-i",
+                temp_merged_video,
+                "-stream_loop",
+                "-1",
+                "-i",
+                ambient_audio,
+            ]
         else:
             print(f"  [Muxer] Applying global audio fade-in/out...")
             filter_complex = (
@@ -473,16 +648,30 @@ class VideoMuxer:
             inputs = ["-i", temp_merged_video]
 
         mix_cmd = [
-            resolve_binary("ffmpeg"), "-y",
+            resolve_binary("ffmpeg"),
+            "-y",
             *inputs,
-            "-filter_complex", filter_complex,
-            "-map", "0:v", "-map", "[outa]",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
-            final_output_path
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "0:v",
+            "-map",
+            "[outa]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            final_output_path,
         ]
         try:
-            subprocess.run(mix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(
+                mix_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
             print(f"  [Muxer] Completed final video with global fade-in/out.")
             return final_output_path
         except subprocess.CalledProcessError as e:

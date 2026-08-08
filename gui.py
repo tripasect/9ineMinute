@@ -14,24 +14,54 @@ import subprocess
 import sys
 import threading
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from runtime import app_data_dir, bundle_dir, ensure_seeded, resolve_binary
+
+# When frozen (PyInstaller), sys.executable is this very app and there is no
+# loose pipeline.py file on disk to shell out to — everything is bundled
+# inside the single executable. To keep the "separate process + live log
+# streaming" UX working in both dev and frozen builds, the frozen app can
+# re-invoke *itself* with a hidden sentinel argument that skips the GUI and
+# runs the pipeline's CLI directly in-process. See `pipeline_command()` and
+# the dispatch below.
+if len(sys.argv) > 1 and sys.argv[1] == "--run-pipeline":
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    import pipeline
+
+    pipeline.main()
+    sys.exit(0)
+
+# CI invokes this hidden command against the frozen executable to ensure the
+# runtime has Pillow's native RAQM support required for Persian/Arabic text.
+if len(sys.argv) > 1 and sys.argv[1] == "--verify-raqm":
+    from PIL import features
+
+    if not features.check("raqm"):
+        raise SystemExit("Pillow RAQM support is unavailable in this build.")
+    raise SystemExit(0)
+
+# BASE_DIR is a stable, writable directory: the project directory in dev
+# mode, or a per-user Application Support directory when frozen (mirrors
+# config.py's BASE_DIR so the GUI and the pipeline agree on where
+# .env / gui_settings.json / output live).
+BASE_DIR = app_data_dir()
 ENV_PATH = os.path.join(BASE_DIR, ".env")
-SETTINGS_PATH = os.path.join(BASE_DIR, "gui_settings.json")
+SETTINGS_PATH = ensure_seeded("gui_settings.json")
 DEFAULT_OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 try:
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox, scrolledtext
+    from tkinter import filedialog, messagebox, scrolledtext, ttk
 except ImportError:
-    sys.exit("tkinter is not available. Install Python with Tk support (e.g. brew install python-tk).")
+    sys.exit(
+        "tkinter is not available. Install Python with Tk support (e.g. brew install python-tk)."
+    )
 
 try:
     from PIL import Image, ImageTk
+
     _PIL_AVAILABLE = True
 except ImportError:
     _PIL_AVAILABLE = False
-
-from runtime import resolve_binary
 
 # ── Fallback defaults (used only when config.py can't be imported) ──────────
 FALLBACK_VIDEO_SETTINGS = {
@@ -54,14 +84,25 @@ FALLBACK_VIDEO_SETTINGS = {
 }
 
 FALLBACK_LANGUAGES = {
-    "en": "English", "fa": "Persian (Farsi)", "ar": "Arabic",
-    "es": "Spanish", "fr": "French", "de": "German", "hi": "Hindi",
-    "ja": "Japanese", "zh": "Chinese",
+    "en": "English",
+    "fa": "Persian (Farsi)",
+    "ar": "Arabic",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "hi": "Hindi",
+    "ja": "Japanese",
+    "zh": "Chinese",
 }
 
 try:
-    from config import VIDEO_SETTINGS, LANGUAGES, REVERSE_RATIO, \
-        DEFAULT_ORIGIN_LANGUAGE, DEFAULT_TARGET_LANGUAGE
+    from config import (
+        DEFAULT_ORIGIN_LANGUAGE,
+        DEFAULT_TARGET_LANGUAGE,
+        LANGUAGES,
+        REVERSE_RATIO,
+        VIDEO_SETTINGS,
+    )
 except Exception:
     VIDEO_SETTINGS = dict(FALLBACK_VIDEO_SETTINGS)
     LANGUAGES = {code: {"name": name} for code, name in FALLBACK_LANGUAGES.items()}
@@ -127,7 +168,15 @@ ENV_LABELS = {
 
 PROVIDER_SECTIONS = [
     ("Phrase Generation Provider", ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"]),
-    ("TTS Generation Provider", ["OPENROUTER_BASE_URL", "OPENROUTER_API_KEY", "TTS_AUDIO_MODEL", "TTS_KOKORO_MODEL"]),
+    (
+        "TTS Generation Provider",
+        [
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_API_KEY",
+            "TTS_AUDIO_MODEL",
+            "TTS_KOKORO_MODEL",
+        ],
+    ),
 ]
 
 
@@ -207,6 +256,20 @@ def project_python() -> str:
     return sys.executable
 
 
+def pipeline_command(args: list) -> list:
+    """Build the subprocess argv to run the pipeline CLI with `args`.
+
+    - Dev mode: `<project venv python> pipeline.py <args>` (unchanged).
+    - Frozen mode: `<this app's executable> --run-pipeline <args>`, which is
+      caught by the sentinel check at import time and dispatched straight to
+      pipeline.main() in-process, since there's no standalone pipeline.py
+      file or separate Python interpreter to shell out to once bundled.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--run-pipeline"] + list(args)
+    return [project_python(), os.path.join(BASE_DIR, "pipeline.py")] + list(args)
+
+
 # ── The app ──────────────────────────────────────────────────────────────────
 class App:
     def __init__(self, root: tk.Tk):
@@ -240,58 +303,132 @@ class App:
             pass
         style.configure(".", background=BG, foreground=FG, font=("Helvetica", 11))
         style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG_ALT, foreground=MUTED,
-                        padding=(14, 8), borderwidth=0, font=("Helvetica", 11, "bold"))
-        style.map("TNotebook.Tab",
-                  background=[("selected", BG_INPUT)],
-                  foreground=[("selected", ACCENT)])
+        style.configure(
+            "TNotebook.Tab",
+            background=BG_ALT,
+            foreground=MUTED,
+            padding=(14, 8),
+            borderwidth=0,
+            font=("Helvetica", 11, "bold"),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", BG_INPUT)],
+            foreground=[("selected", ACCENT)],
+        )
         style.configure("TFrame", background=BG)
         style.configure("Card.TFrame", background=BG_ALT)
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("Card.TLabel", background=BG_ALT, foreground=FG)
-        style.configure("Title.TLabel", background=BG, foreground=FG,
-                        font=("Helvetica", 14, "bold"))
-        style.configure("Section.TLabel", background=BG_ALT, foreground=ACCENT,
-                        font=("Helvetica", 11, "bold"))
-        style.configure("TEntry", fieldbackground=BG_INPUT, foreground=FG,
-                        insertcolor=FG, bordercolor=BG_INPUT, lightcolor=BG_INPUT,
-                        darkcolor=BG_INPUT, padding=4)
-        style.configure("TCombobox", fieldbackground=BG_INPUT, background=BG_INPUT,
-                        foreground=FG, arrowcolor=MUTED, bordercolor=BG_INPUT,
-                        lightcolor=BG_INPUT, darkcolor=BG_INPUT, padding=4)
-        style.map("TCombobox", fieldbackground=[("readonly", BG_INPUT)],
-                  foreground=[("readonly", FG)])
-        style.configure("Accent.TButton", background=ACCENT, foreground="#11111b",
-                        bordercolor=ACCENT, padding=(16, 8), font=("Helvetica", 11, "bold"))
-        style.map("Accent.TButton", background=[("active", "#a6bdf6")],
-                  foreground=[("disabled", "#6c7086")])
-        style.configure("TButton", background=BG_INPUT, foreground=FG,
-                        bordercolor=BG_INPUT, padding=(12, 6))
+        style.configure(
+            "Title.TLabel", background=BG, foreground=FG, font=("Helvetica", 14, "bold")
+        )
+        style.configure(
+            "Section.TLabel",
+            background=BG_ALT,
+            foreground=ACCENT,
+            font=("Helvetica", 11, "bold"),
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=BG_INPUT,
+            foreground=FG,
+            insertcolor=FG,
+            bordercolor=BG_INPUT,
+            lightcolor=BG_INPUT,
+            darkcolor=BG_INPUT,
+            padding=4,
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=BG_INPUT,
+            background=BG_INPUT,
+            foreground=FG,
+            arrowcolor=MUTED,
+            bordercolor=BG_INPUT,
+            lightcolor=BG_INPUT,
+            darkcolor=BG_INPUT,
+            padding=4,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", BG_INPUT)],
+            foreground=[("readonly", FG)],
+        )
+        style.configure(
+            "Accent.TButton",
+            background=ACCENT,
+            foreground="#11111b",
+            bordercolor=ACCENT,
+            padding=(16, 8),
+            font=("Helvetica", 11, "bold"),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#a6bdf6")],
+            foreground=[("disabled", "#6c7086")],
+        )
+        style.configure(
+            "TButton",
+            background=BG_INPUT,
+            foreground=FG,
+            bordercolor=BG_INPUT,
+            padding=(12, 6),
+        )
         style.map("TButton", background=[("active", "#3b3b52")])
         # Settings button — visually distinct, sits to the right of the tab bar
-        style.configure("Settings.TButton", background=BG_ALT, foreground=ACCENT,
-                        bordercolor=ACCENT, padding=(16, 10), font=("Helvetica", 10, "bold"))
+        style.configure(
+            "Settings.TButton",
+            background=BG_ALT,
+            foreground=ACCENT,
+            bordercolor=ACCENT,
+            padding=(16, 10),
+            font=("Helvetica", 10, "bold"),
+        )
         style.map("Settings.TButton", background=[("active", BG_INPUT)])
         style.configure("TCheckbutton", background=BG, foreground=FG, focuscolor=BG)
         style.configure("Horizontal.TScale", background=BG)
 
     # ------------------------------------------------------------------ menu
     def _build_menu(self):
-        menubar = tk.Menu(self.root, bg=BG_ALT, fg=FG, activebackground=ACCENT,
-                          activeforeground="#11111b")
-        file_menu = tk.Menu(menubar, tearoff=0, bg=BG_ALT, fg=FG,
-                            activebackground=ACCENT, activeforeground="#11111b")
-        file_menu.add_command(label="Save provider settings", command=self.save_providers)
+        menubar = tk.Menu(
+            self.root,
+            bg=BG_ALT,
+            fg=FG,
+            activebackground=ACCENT,
+            activeforeground="#11111b",
+        )
+        file_menu = tk.Menu(
+            menubar,
+            tearoff=0,
+            bg=BG_ALT,
+            fg=FG,
+            activebackground=ACCENT,
+            activeforeground="#11111b",
+        )
+        file_menu.add_command(
+            label="Save provider settings", command=self.save_providers
+        )
         file_menu.add_command(label="Save all settings", command=self.save_all)
         file_menu.add_separator()
-        file_menu.add_command(label="Open output folder", command=self.open_output_folder)
+        file_menu.add_command(
+            label="Open output folder", command=self.open_output_folder
+        )
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.root.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
-        help_menu = tk.Menu(menubar, tearoff=0, bg=BG_ALT, fg=FG,
-                            activebackground=ACCENT, activeforeground="#11111b")
-        help_menu.add_command(label="README", command=lambda: self._open_path("README.md"))
+        help_menu = tk.Menu(
+            menubar,
+            tearoff=0,
+            bg=BG_ALT,
+            fg=FG,
+            activebackground=ACCENT,
+            activeforeground="#11111b",
+        )
+        help_menu.add_command(
+            label="README", command=lambda: self._open_path("README.md")
+        )
         menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
 
@@ -307,9 +444,12 @@ class App:
 
         side = ttk.Frame(container)
         side.pack(side="left", fill="y", padx=(10, 0))
-        self.settings_btn = ttk.Button(side, text="⚙  Settings",
-                                       style="Settings.TButton",
-                                       command=self._open_settings)
+        self.settings_btn = ttk.Button(
+            side,
+            text="⚙  Settings",
+            style="Settings.TButton",
+            command=self._open_settings,
+        )
         self.settings_btn.pack(anchor="n")
 
         self.tab_content = ttk.Frame(self.notebook)
@@ -343,8 +483,11 @@ class App:
 
         header = ttk.Label(win, text="Providers & API keys", style="Title.TLabel")
         header.pack(anchor="w", padx=14, pady=(14, 2))
-        sub = ttk.Label(win, text="Saved straight into .env — used by the next run.",
-                        style="Muted.TLabel")
+        sub = ttk.Label(
+            win,
+            text="Saved straight into .env — used by the next run.",
+            style="Muted.TLabel",
+        )
         sub.pack(anchor="w", padx=14, pady=(0, 10))
 
         body = ttk.Frame(win)
@@ -356,12 +499,14 @@ class App:
             card = ttk.Frame(body, style="Card.TFrame")
             card.grid(row=idx, column=0, sticky="ew", padx=4, pady=(0, 12))
             ttk.Label(card, text=title, style="Section.TLabel").pack(
-                anchor="w", padx=12, pady=(10, 6))
+                anchor="w", padx=12, pady=(10, 6)
+            )
             for key in keys:
                 row = ttk.Frame(card, style="Card.TFrame")
                 row.pack(fill="x", padx=12, pady=3)
-                ttk.Label(row, text=ENV_LABELS[key], width=26,
-                          style="Card.TLabel").pack(side="left", anchor="w")
+                ttk.Label(
+                    row, text=ENV_LABELS[key], width=26, style="Card.TLabel"
+                ).pack(side="left", anchor="w")
                 var = tk.StringVar(value=self.env.get(key, ""))
                 entry = ttk.Entry(row, textvariable=var)
                 entry.pack(side="left", fill="x", expand=True, ipady=2)
@@ -369,10 +514,12 @@ class App:
 
         btn_row = ttk.Frame(win)
         btn_row.pack(fill="x", padx=14, pady=(0, 12))
-        ttk.Button(btn_row, text="💾  Save",
-                   style="Accent.TButton",
-                   command=lambda: self.save_providers(show=True, parent=win)
-                   ).pack(side="left")
+        ttk.Button(
+            btn_row,
+            text="💾  Save",
+            style="Accent.TButton",
+            command=lambda: self.save_providers(show=True, parent=win),
+        ).pack(side="left")
         win.provider_status = ttk.Label(btn_row, text="", style="Muted.TLabel")
         win.provider_status.pack(side="left", padx=12)
 
@@ -381,8 +528,9 @@ class App:
     # ------------------------------------------------------- content tab
     def _build_content_tab(self):
         tab = self.tab_content
-        header = ttk.Label(tab, text="Content generation preferences",
-                           style="Title.TLabel")
+        header = ttk.Label(
+            tab, text="Content generation preferences", style="Title.TLabel"
+        )
         header.pack(anchor="w", padx=14, pady=(12, 10))
 
         cols = ttk.Frame(tab)
@@ -400,16 +548,24 @@ class App:
 
         # ── Left column ──────────────────────────────────────────────
         ttk.Label(left, text="Video & content", style="Section.TLabel").pack(
-            anchor="w", padx=12, pady=(10, 6))
+            anchor="w", padx=12, pady=(10, 6)
+        )
 
         self.preset_var = tk.StringVar(value=g.get("preset", PRESETS[0][0]))
         preset_row = self._labeled_row(left, "Length preset")
-        preset_cb = ttk.Combobox(preset_row, textvariable=self.preset_var,
-                                 values=[p[0] for p in PRESETS], state="readonly", width=18)
+        preset_cb = ttk.Combobox(
+            preset_row,
+            textvariable=self.preset_var,
+            values=[p[0] for p in PRESETS],
+            state="readonly",
+            width=18,
+        )
         preset_cb.pack(side="left", fill="x", expand=True)
         preset_cb.bind("<<ComboboxSelected>>", self._on_preset)
 
-        self.duration_var = tk.IntVar(value=g.get("duration", VIDEO_SETTINGS.get("duration_seconds", 540)))
+        self.duration_var = tk.IntVar(
+            value=g.get("duration", VIDEO_SETTINGS.get("duration_seconds", 540))
+        )
         self._labeled_row(left, "Duration (seconds)", self.duration_var, 0, 9999)
 
         self.count_var = tk.IntVar(value=g.get("count", 40))
@@ -421,100 +577,191 @@ class App:
         self.level_var = tk.StringVar(value=g.get("level", "any level"))
         self._labeled_row(left, "CEFR level", self.level_var, choices=LEVELS)
 
-        self.origin_var = tk.StringVar(value=g.get("origin_lang", DEFAULT_ORIGIN_LANGUAGE))
-        self._labeled_row(left, "Origin language", self.origin_var,
-                          choices=list(LANGUAGES.keys()), readonly=True)
+        self.origin_var = tk.StringVar(
+            value=g.get("origin_lang", DEFAULT_ORIGIN_LANGUAGE)
+        )
+        self._labeled_row(
+            left,
+            "Origin language",
+            self.origin_var,
+            choices=list(LANGUAGES.keys()),
+            readonly=True,
+        )
 
-        self.target_var = tk.StringVar(value=g.get("target_lang", DEFAULT_TARGET_LANGUAGE))
-        self._labeled_row(left, "Target language", self.target_var,
-                          choices=list(LANGUAGES.keys()), readonly=True)
+        self.target_var = tk.StringVar(
+            value=g.get("target_lang", DEFAULT_TARGET_LANGUAGE)
+        )
+        self._labeled_row(
+            left,
+            "Target language",
+            self.target_var,
+            choices=list(LANGUAGES.keys()),
+            readonly=True,
+        )
 
-        self.reps_var = tk.IntVar(value=g.get("repetitions", VIDEO_SETTINGS.get("repetitions", 0)))
+        self.reps_var = tk.IntVar(
+            value=g.get("repetitions", VIDEO_SETTINGS.get("repetitions", 0))
+        )
         self._labeled_row(left, "Repetitions (0–5)", self.reps_var, 0, 5)
 
         self.reverse_var = tk.DoubleVar(value=g.get("reverse_ratio", REVERSE_RATIO))
         rev_row = self._labeled_row(left, "Reverse ratio")
-        rev_scale = ttk.Scale(rev_row, from_=0.0, to=1.0, variable=self.reverse_var,
-                              orient="horizontal", command=self._on_reverse_slide)
+        rev_scale = ttk.Scale(
+            rev_row,
+            from_=0.0,
+            to=1.0,
+            variable=self.reverse_var,
+            orient="horizontal",
+            command=self._on_reverse_slide,
+        )
         rev_scale.pack(side="left", fill="x", expand=True)
-        self.reverse_label = ttk.Label(rev_row, text=f"{self.reverse_var.get():.0%}",
-                                       style="Card.TLabel", width=5)
+        self.reverse_label = ttk.Label(
+            rev_row, text=f"{self.reverse_var.get():.0%}", style="Card.TLabel", width=5
+        )
         self.reverse_label.pack(side="left")
 
         self.output_var = tk.StringVar(value=g.get("output", "video_language.mp4"))
         self._labeled_row(left, "Output filename", self.output_var)
 
         self.custom_phrases_var = tk.StringVar(value=g.get("custom_phrases", ""))
-        self._file_row(left, "Custom phrases (JSON)", self.custom_phrases_var, preview_type="json")
+        self._file_row(
+            left, "Custom phrases (JSON)", self.custom_phrases_var, preview_type="json"
+        )
 
         # ── Right column ─────────────────────────────────────────────
-        ttk.Label(right, text="Background & video settings", style="Section.TLabel").pack(
-            anchor="w", padx=12, pady=(10, 6))
+        ttk.Label(
+            right, text="Background & video settings", style="Section.TLabel"
+        ).pack(anchor="w", padx=12, pady=(10, 6))
 
         # Pre-fill background image from saved settings or config default
-        _bg_image_default = g.get(
-            "background_image",
-            VIDEO_SETTINGS.get("background_image") or ""
-        ) or ""
+        _bg_image_default = (
+            g.get("background_image", VIDEO_SETTINGS.get("background_image") or "")
+            or ""
+        )
         self.bg_image_var = tk.StringVar(value=_bg_image_default)
-        self._file_row(right, "Background image", self.bg_image_var, preview_type="image",
-                       hint="(optional)")
+        self._file_row(
+            right,
+            "Background image",
+            self.bg_image_var,
+            preview_type="image",
+            hint="(optional)",
+        )
 
         # Pre-fill background music from saved settings or config default
-        _bg_music_default = g.get(
-            "background_music",
-            VIDEO_SETTINGS.get("background_audio") or ""
-        ) or ""
+        _bg_music_default = (
+            g.get("background_music", VIDEO_SETTINGS.get("background_audio") or "")
+            or ""
+        )
         self.bg_music_var = tk.StringVar(value=_bg_music_default)
-        self._file_row(right, "Background music", self.bg_music_var, preview_type="audio")
+        self._file_row(
+            right, "Background music", self.bg_music_var, preview_type="audio"
+        )
 
-        self.watermark_var = tk.StringVar(value=g.get("watermark", VIDEO_SETTINGS.get("watermark") or ""))
-        self._file_row(right, "Watermark image", self.watermark_var, preview_type="image")
+        self.watermark_var = tk.StringVar(
+            value=g.get("watermark", VIDEO_SETTINGS.get("watermark") or "")
+        )
+        self._file_row(
+            right, "Watermark image", self.watermark_var, preview_type="image"
+        )
 
-        self.width_var = tk.IntVar(value=g.get("width", VIDEO_SETTINGS.get("width", 1920)))
+        self.width_var = tk.IntVar(
+            value=g.get("width", VIDEO_SETTINGS.get("width", 1920))
+        )
         self._labeled_row(right, "Width (px)", self.width_var, 320, 7680)
 
-        self.height_var = tk.IntVar(value=g.get("height", VIDEO_SETTINGS.get("height", 1080)))
+        self.height_var = tk.IntVar(
+            value=g.get("height", VIDEO_SETTINGS.get("height", 1080))
+        )
         self._labeled_row(right, "Height (px)", self.height_var, 240, 4320)
 
         self.fps_var = tk.IntVar(value=g.get("fps", VIDEO_SETTINGS.get("fps", 25)))
         self._labeled_row(right, "FPS", self.fps_var, 5, 120)
 
-        self.pause_var = tk.DoubleVar(value=g.get("pause_duration", VIDEO_SETTINGS.get("pause_duration", 2)))
+        self.pause_var = tk.DoubleVar(
+            value=g.get("pause_duration", VIDEO_SETTINGS.get("pause_duration", 2))
+        )
         self._labeled_row(right, "Pause after TTS (s)", self.pause_var, 0.0, 30.0, 0.1)
 
-        self.gap_var = tk.DoubleVar(value=g.get("phrase_gap_duration", VIDEO_SETTINGS.get("phrase_gap_duration", 2)))
-        self._labeled_row(right, "Gap between phrases (s)", self.gap_var, 0.0, 30.0, 0.1)
+        self.gap_var = tk.DoubleVar(
+            value=g.get(
+                "phrase_gap_duration", VIDEO_SETTINGS.get("phrase_gap_duration", 2)
+            )
+        )
+        self._labeled_row(
+            right, "Gap between phrases (s)", self.gap_var, 0.0, 30.0, 0.1
+        )
 
-        self.rep_pause_var = tk.DoubleVar(value=g.get("repeat_pause_duration", VIDEO_SETTINGS.get("repeat_pause_duration", 0.5)))
+        self.rep_pause_var = tk.DoubleVar(
+            value=g.get(
+                "repeat_pause_duration",
+                VIDEO_SETTINGS.get("repeat_pause_duration", 0.5),
+            )
+        )
         self._labeled_row(right, "Repeat pause (s)", self.rep_pause_var, 0.0, 30.0, 0.1)
 
-        self.bg_vol_var = tk.DoubleVar(value=g.get("background_audio_volume", VIDEO_SETTINGS.get("background_audio_volume", 0.3)))
+        self.bg_vol_var = tk.DoubleVar(
+            value=g.get(
+                "background_audio_volume",
+                VIDEO_SETTINGS.get("background_audio_volume", 0.3),
+            )
+        )
         self._labeled_row(right, "Music volume (0–1)", self.bg_vol_var, 0.0, 1.0, 0.05)
 
-        self.fade_var = tk.DoubleVar(value=g.get("fade_duration", VIDEO_SETTINGS.get("fade_duration", 0.5)))
+        self.fade_var = tk.DoubleVar(
+            value=g.get("fade_duration", VIDEO_SETTINGS.get("fade_duration", 0.5))
+        )
         self._labeled_row(right, "Text fade (s)", self.fade_var, 0.0, 5.0, 0.1)
 
-        self.handle_var = tk.StringVar(value=g.get("channel_handle", VIDEO_SETTINGS.get("channel_handle", "YouTube.com/@9ineMinuteEnglish")))
+        self.handle_var = tk.StringVar(
+            value=g.get(
+                "channel_handle",
+                VIDEO_SETTINGS.get("channel_handle", "YouTube.com/@9ineMinuteEnglish"),
+            )
+        )
         self._labeled_row(right, "Channel handle", self.handle_var)
 
-    def _labeled_row(self, parent, label, var=None, lo=0, hi=999, step=1,
-                     choices=None, readonly=False):
+    def _labeled_row(
+        self,
+        parent,
+        label,
+        var=None,
+        lo=0,
+        hi=999,
+        step=1,
+        choices=None,
+        readonly=False,
+    ):
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", padx=12, pady=3)
         lbl = ttk.Label(row, text=label, width=24, style="Card.TLabel")
         lbl.pack(side="left", anchor="w")
         if var is not None:
             if choices is not None:
-                cb = ttk.Combobox(row, textvariable=var, values=choices,
-                                  state="readonly" if readonly else "normal", width=20)
+                cb = ttk.Combobox(
+                    row,
+                    textvariable=var,
+                    values=choices,
+                    state="readonly" if readonly else "normal",
+                    width=20,
+                )
                 cb.pack(side="left", fill="x", expand=True)
             elif isinstance(var, (tk.IntVar, tk.DoubleVar)):
-                sp = tk.Spinbox(row, from_=lo, to=hi, increment=step,
-                                textvariable=var, width=20, bg=BG_INPUT, fg=FG,
-                                insertbackground=FG, buttonbackground=BG_ALT,
-                                relief="flat", highlightthickness=1,
-                                highlightbackground=BG_INPUT, highlightcolor=ACCENT)
+                sp = tk.Spinbox(
+                    row,
+                    from_=lo,
+                    to=hi,
+                    increment=step,
+                    textvariable=var,
+                    width=20,
+                    bg=BG_INPUT,
+                    fg=FG,
+                    insertbackground=FG,
+                    buttonbackground=BG_ALT,
+                    relief="flat",
+                    highlightthickness=1,
+                    highlightbackground=BG_INPUT,
+                    highlightcolor=ACCENT,
+                )
                 sp.pack(side="left", fill="x", expand=True)
             else:
                 entry = ttk.Entry(row, textvariable=var)
@@ -526,12 +773,16 @@ class App:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", padx=12, pady=3)
 
-        ttk.Label(row, text=label, width=24, style="Card.TLabel").pack(side="left", anchor="w")
+        ttk.Label(row, text=label, width=24, style="Card.TLabel").pack(
+            side="left", anchor="w"
+        )
 
         entry = ttk.Entry(row, textvariable=var)
         entry.pack(side="left", fill="x", expand=True, ipady=2)
         if hint:
-            ttk.Label(row, text=hint, style="Muted.TLabel").pack(side="left", padx=(4, 0))
+            ttk.Label(row, text=hint, style="Muted.TLabel").pack(
+                side="left", padx=(4, 0)
+            )
 
         row.preview_type = preview_type
         row.preview_btn = None
@@ -539,22 +790,27 @@ class App:
         if preview_type == "audio":
             # Audio rows get a single play/stop toggle — no eye/preview button.
             play_btn = ttk.Button(
-                row, text="▶", width=5, state="disabled",
-                command=lambda v=var, r=row: self._toggle_audio_preview(v, r)
+                row,
+                text="▶",
+                width=5,
+                state="disabled",
+                command=lambda v=var, r=row: self._toggle_audio_preview(v, r),
             )
             play_btn.pack(side="left", padx=(6, 0))
             row.play_btn = play_btn
         else:
             preview_btn = ttk.Button(
-                row, text="👁️", width=4, state="disabled",
-                command=lambda v=var, l=label, t=preview_type: self._preview(v, l, t)
+                row,
+                text="👁️",
+                width=4,
+                state="disabled",
+                command=lambda v=var, l=label, t=preview_type: self._preview(v, l, t),
             )
             preview_btn.pack(side="left", padx=(6, 0))
             row.preview_btn = preview_btn
 
         ttk.Button(
-            row, text="📂", width=4,
-            command=lambda v=var, l=label: self._browse(v, l)
+            row, text="📂", width=4, command=lambda v=var, l=label: self._browse(v, l)
         ).pack(side="left", padx=(6, 0))
 
         # Store row reference for later lookup (keyed by id since StringVar is unhashable)
@@ -577,17 +833,25 @@ class App:
 
     def _browse(self, var, label):
         if "image" in label.lower():
-            kinds = [("Images", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")]
+            kinds = [
+                ("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                ("All files", "*.*"),
+            ]
         elif "music" in label.lower() or "audio" in label.lower():
             kinds = [("Audio", "*.mp3 *.wav *.m4a *.aac"), ("All files", "*.*")]
         elif "phrases" in label.lower():
             kinds = [("JSON", "*.json"), ("All files", "*.*")]
         else:
-            kinds = [("Images", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")]
+            kinds = [
+                ("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                ("All files", "*.*"),
+            ]
 
         path = filedialog.askopenfilename(
-            parent=self.root, title=f"Choose {label}",
-            filetypes=kinds, initialdir=BASE_DIR
+            parent=self.root,
+            title=f"Choose {label}",
+            filetypes=kinds,
+            initialdir=BASE_DIR,
         )
         if path:
             rel = os.path.relpath(path, BASE_DIR) if path.startswith(BASE_DIR) else path
@@ -608,7 +872,9 @@ class App:
         if not os.path.isabs(path):
             path = os.path.join(BASE_DIR, path)
         if not os.path.exists(path):
-            messagebox.showwarning("File not found", f"File not found:\n{path}", parent=self.root)
+            messagebox.showwarning(
+                "File not found", f"File not found:\n{path}", parent=self.root
+            )
             return
 
         if preview_type == "image":
@@ -616,7 +882,7 @@ class App:
                 messagebox.showwarning(
                     "PIL not installed",
                     "Install Pillow to preview images:\n  pip install Pillow",
-                    parent=self.root
+                    parent=self.root,
                 )
                 return
             try:
@@ -633,8 +899,15 @@ class App:
                 lbl.image = photo  # keep reference
                 lbl.pack(padx=10, pady=10)
 
-                tk.Button(win, text="✕  Close", command=win.destroy,
-                          bg=BG_INPUT, fg=FG, relief="flat", padx=12).pack(pady=(0, 10))
+                tk.Button(
+                    win,
+                    text="✕  Close",
+                    command=win.destroy,
+                    bg=BG_INPUT,
+                    fg=FG,
+                    relief="flat",
+                    padx=12,
+                ).pack(pady=(0, 10))
             except Exception as exc:
                 messagebox.showerror("Preview failed", str(exc), parent=self.root)
 
@@ -656,8 +929,15 @@ class App:
                 txt.config(state="disabled")
                 txt.pack(fill="both", expand=True, padx=10, pady=10)
 
-                tk.Button(win, text="Close", command=win.destroy,
-                          bg=BG_INPUT, fg=FG, relief="flat", padx=12).pack(pady=(0, 10))
+                tk.Button(
+                    win,
+                    text="Close",
+                    command=win.destroy,
+                    bg=BG_INPUT,
+                    fg=FG,
+                    relief="flat",
+                    padx=12,
+                ).pack(pady=(0, 10))
             except Exception as exc:
                 messagebox.showerror("Preview failed", str(exc), parent=self.root)
 
@@ -679,19 +959,39 @@ class App:
         path = var.get()
         if not path:
             return
-        if not os.path.isabs(path):
-            path = os.path.join(BASE_DIR, path)
-        if not os.path.exists(path):
-            messagebox.showwarning("File not found", f"File not found:\n{path}", parent=self.root)
+
+        # Resolve path: check direct, then bundle, then BASE_DIR
+        resolved = None
+        if os.path.isabs(path) and os.path.exists(path):
+            resolved = path
+        elif os.path.exists(os.path.join(bundle_dir(), os.path.basename(path))):
+            resolved = os.path.join(bundle_dir(), os.path.basename(path))
+        elif os.path.exists(os.path.join(BASE_DIR, path)):
+            resolved = os.path.join(BASE_DIR, path)
+
+        if not resolved:
+            messagebox.showwarning(
+                "File not found", f"File not found:\n{path}", parent=self.root
+            )
             return
+
+        path = resolved
 
         try:
             if sys.platform == "darwin":
                 proc = subprocess.Popen(["afplay", path])
             else:
                 proc = subprocess.Popen(
-                    [resolve_binary("ffplay"), "-nodisp", "-autoexit", "-loglevel", "quiet", path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    [
+                        resolve_binary("ffplay"),
+                        "-nodisp",
+                        "-autoexit",
+                        "-loglevel",
+                        "quiet",
+                        path,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
         except Exception as exc:
             messagebox.showerror("Playback failed", str(exc), parent=self.root)
@@ -729,49 +1029,67 @@ class App:
         tab = self.tab_run
         top = ttk.Frame(tab)
         top.pack(fill="x", padx=12, pady=(12, 8))
-        self.summary_label = ttk.Label(top, text="", style="Muted.TLabel", wraplength=1200)
+        self.summary_label = ttk.Label(
+            top, text="", style="Muted.TLabel", wraplength=1200
+        )
         self.summary_label.pack(fill="x")
 
         # Output directory (with browse)
         out_row = ttk.Frame(tab)
         out_row.pack(fill="x", padx=12, pady=(0, 8))
-        ttk.Label(out_row, text="Output directory", width=18).pack(side="left", anchor="w")
+        ttk.Label(out_row, text="Output directory", width=18).pack(
+            side="left", anchor="w"
+        )
         self.output_dir_var = tk.StringVar(
             value=self.gui.get("output_dir", DEFAULT_OUTPUT_DIR)
         )
         out_entry = ttk.Entry(out_row, textvariable=self.output_dir_var)
         out_entry.pack(side="left", fill="x", expand=True, ipady=2)
-        ttk.Button(out_row, text="📂", width=4,
-                   command=self._browse_output_dir).pack(side="left", padx=(6, 0))
+        ttk.Button(out_row, text="📂", width=4, command=self._browse_output_dir).pack(
+            side="left", padx=(6, 0)
+        )
 
         self.log_text = scrolledtext.ScrolledText(
-            tab, height=20, bg="#15151f", fg=FG, insertbackground=FG,
-            relief="flat", borderwidth=8, font=("Menlo", 11),
-            state="disabled", wrap="word")
+            tab,
+            height=20,
+            bg="#15151f",
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            borderwidth=8,
+            font=("Menlo", 11),
+            state="disabled",
+            wrap="word",
+        )
         self.log_text.pack(fill="both", expand=True, padx=12, pady=(0, 8))
 
         ctrl = ttk.Frame(tab)
         ctrl.pack(fill="x", padx=12, pady=(0, 10))
-        self.run_btn = ttk.Button(ctrl, text="▶  Generate",
-                                  style="Accent.TButton", command=self.generate)
+        self.run_btn = ttk.Button(
+            ctrl, text="▶  Generate", style="Accent.TButton", command=self.generate
+        )
         self.run_btn.pack(side="left")
-        self.preview_btn = ttk.Button(ctrl, text="⚡  Preview",
-                                      command=self.preview_generate)
+        self.preview_btn = ttk.Button(
+            ctrl, text="⚡  Preview", command=self.preview_generate
+        )
         self.preview_btn.pack(side="left", padx=8)
         self.stop_btn = ttk.Button(ctrl, text="🗑  Clear", command=self.clear_log)
         self.stop_btn.pack(side="left", padx=8)
-        ttk.Button(ctrl, text="📁  Output",
-                   command=self.open_output_folder).pack(side="right")
+        ttk.Button(ctrl, text="📁  Output", command=self.open_output_folder).pack(
+            side="right"
+        )
         hint = ttk.Label(
-            tab, text="Preview generation builds a ~15s video from a hard-coded "
-                      "phrase with local/silent audio — no LLM or TTS API calls.",
+            tab,
+            text="Preview generation builds a ~15s video from a hard-coded "
+            "phrase with real TTS audio — no LLM API call.",
             style="Muted.TLabel",
         )
         hint.pack(anchor="w", padx=12, pady=(0, 8))
 
     def _browse_output_dir(self):
         path = filedialog.askdirectory(
-            parent=self.root, title="Choose output directory",
+            parent=self.root,
+            title="Choose output directory",
             initialdir=self.output_dir_var.get() or DEFAULT_OUTPUT_DIR,
         )
         if path:
@@ -779,9 +1097,16 @@ class App:
 
     def _build_statusbar(self):
         self.status_var = tk.StringVar(value="Ready")
-        bar = tk.Label(self.root, textvariable=self.status_var, bg=BG_ALT,
-                       fg=MUTED, anchor="w", padx=12, pady=3,
-                       font=("Helvetica", 10))
+        bar = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            bg=BG_ALT,
+            fg=MUTED,
+            anchor="w",
+            padx=12,
+            pady=3,
+            font=("Helvetica", 10),
+        )
         bar.pack(fill="x", side="bottom")
 
     # ------------------------------------------------------------- actions
@@ -844,10 +1169,17 @@ class App:
     def _video_settings_dict(self) -> dict:
         g = self.collect_content()
         vs = {}
-        for key in ("width", "height", "fps", "pause_duration",
-                    "phrase_gap_duration", "repeat_pause_duration",
-                    "background_audio_volume", "fade_duration",
-                    "channel_handle"):
+        for key in (
+            "width",
+            "height",
+            "fps",
+            "pause_duration",
+            "phrase_gap_duration",
+            "repeat_pause_duration",
+            "background_audio_volume",
+            "fade_duration",
+            "channel_handle",
+        ):
             vs[key] = g[key]
         if g["watermark"]:
             vs["watermark"] = g["watermark"]
@@ -867,15 +1199,30 @@ class App:
         target = g["target_lang"]
         for code, label in (("origin", origin), ("target", target)):
             if code == "origin" and label not in LANGUAGES:
-                messagebox.showerror("Unknown language", f"Unknown origin language: {label}", parent=self.root)
+                messagebox.showerror(
+                    "Unknown language",
+                    f"Unknown origin language: {label}",
+                    parent=self.root,
+                )
                 return
             if code == "target" and label not in LANGUAGES:
-                messagebox.showerror("Unknown language", f"Unknown target language: {label}", parent=self.root)
+                messagebox.showerror(
+                    "Unknown language",
+                    f"Unknown target language: {label}",
+                    parent=self.root,
+                )
                 return
 
-        if g["custom_phrases"] and not os.path.exists(os.path.join(BASE_DIR, g["custom_phrases"])) \
-                and not os.path.exists(g["custom_phrases"]):
-            messagebox.showerror("Missing file", f"Custom phrases file not found:\n{g['custom_phrases']}", parent=self.root)
+        if (
+            g["custom_phrases"]
+            and not os.path.exists(os.path.join(BASE_DIR, g["custom_phrases"]))
+            and not os.path.exists(g["custom_phrases"])
+        ):
+            messagebox.showerror(
+                "Missing file",
+                f"Custom phrases file not found:\n{g['custom_phrases']}",
+                parent=self.root,
+            )
             return
 
         topic = g["topic"] or TOPICS[0]
@@ -883,35 +1230,44 @@ class App:
             topic = f"{topic} ({g['level']})"
 
         # Persist UI prefs + run-scoped settings for the subprocess to read.
-        save_gui_settings({
-            "content": g,
-            "video_settings": self._video_settings_dict(),
-            "reverse_ratio": g["reverse_ratio"],
-        })
+        save_gui_settings(
+            {
+                "content": g,
+                "video_settings": self._video_settings_dict(),
+                "reverse_ratio": g["reverse_ratio"],
+            }
+        )
 
-        cmd = [
-            project_python(), os.path.join(BASE_DIR, "pipeline.py"),
-            "--topic", topic,
-            "--count", str(g["count"]),
-            "--duration", str(g["duration"]),
-            "--origin-lang", origin,
-            "--target-lang", target,
-            "--repetitions", str(g["repetitions"]),
-            "--output", g["output"],
-            "--settings", SETTINGS_PATH,
+        args = [
+            "--topic",
+            topic,
+            "--count",
+            str(g["count"]),
+            "--duration",
+            str(g["duration"]),
+            "--origin-lang",
+            origin,
+            "--target-lang",
+            target,
+            "--repetitions",
+            str(g["repetitions"]),
+            "--output",
+            g["output"],
+            "--settings",
+            SETTINGS_PATH,
         ]
         if g["background_image"]:
-            cmd += ["--background-image", g["background_image"]]
+            args += ["--background-image", g["background_image"]]
         if g["background_music"]:
-            cmd += ["--background-music", g["background_music"]]
+            args += ["--background-music", g["background_music"]]
         if g["custom_phrases"]:
-            cmd += ["--custom-phrases", g["custom_phrases"]]
+            args += ["--custom-phrases", g["custom_phrases"]]
 
         self._preview_output = None
-        self._launch(cmd, "Generating")
+        self._launch(pipeline_command(args), "Generating")
 
     def preview_generate(self):
-        """Token-free dry run: one hard-coded phrase, single pass, no APIs."""
+        """Short real sample: hard-coded phrase, real TTS, no LLM call."""
         if self.running:
             return
         if not self.save_all():
@@ -930,28 +1286,34 @@ class App:
                 return
 
         # Persist UI prefs + run-scoped settings for the subprocess to read.
-        save_gui_settings({
-            "content": g,
-            "video_settings": self._video_settings_dict(),
-            "reverse_ratio": g["reverse_ratio"],
-        })
+        save_gui_settings(
+            {
+                "content": g,
+                "video_settings": self._video_settings_dict(),
+                "reverse_ratio": g["reverse_ratio"],
+            }
+        )
 
-        cmd = [
-            project_python(), os.path.join(BASE_DIR, "pipeline.py"),
+        args = [
             "--preview",
-            "--origin-lang", origin,
-            "--target-lang", target,
-            "--repetitions", str(g["repetitions"]),
-            "--output", "preview.mp4",
-            "--settings", SETTINGS_PATH,
+            "--origin-lang",
+            origin,
+            "--target-lang",
+            target,
+            "--repetitions",
+            str(g["repetitions"]),
+            "--output",
+            "preview.mp4",
+            "--settings",
+            SETTINGS_PATH,
         ]
         if g["background_image"]:
-            cmd += ["--background-image", g["background_image"]]
+            args += ["--background-image", g["background_image"]]
         if g["background_music"]:
-            cmd += ["--background-music", g["background_music"]]
+            args += ["--background-music", g["background_music"]]
 
         self._preview_output = os.path.join(g["output_dir"], "preview.mp4")
-        self._launch(cmd, "Preview generation")
+        self._launch(pipeline_command(args), "Preview generation")
 
     def _launch(self, cmd, label):
         self._append_log("─" * 60)
@@ -966,9 +1328,14 @@ class App:
         def worker():
             try:
                 proc = subprocess.Popen(
-                    cmd, cwd=BASE_DIR, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1,
-                    encoding="utf-8", errors="replace",
+                    cmd,
+                    cwd=BASE_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 for line in proc.stdout:
                     self.log_queue.put(line.rstrip())
