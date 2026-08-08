@@ -12,7 +12,7 @@ from config import (
 )
 from runtime import resolve_binary
 
-from .cache import ContentCache
+from modules.cache import ContentCache
 
 
 class OpenRouterAudioGenerator:
@@ -35,7 +35,7 @@ class OpenRouterAudioGenerator:
         return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
     def _create_silent_fallback(self, output_path: str, duration: float = 2.0):
-        """Generates a valid silent MP3 audio file using FFmpeg."""
+        """Generates a valid silent MP3 audio file using FFmpeg with pure Python fallback."""
         print(
             f"  [TTS] Generating silent fallback audio ({duration}s) for {output_path}..."
         )
@@ -58,8 +58,15 @@ class OpenRouterAudioGenerator:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
         except Exception as e:
             print(f"  [TTS] Fallback silent audio generation failed: {e}")
-            with open(output_path, "wb") as f:
-                pass
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            try:
+                frame = b"\xff\xfb\x90\xc4" + b"\x00" * 413
+                num_frames = int(duration * 38.28) + 1
+                with open(output_path, "wb") as f:
+                    f.write(frame * num_frames)
+            except Exception as e2:
+                print(f"  [TTS] Pure-Python fallback silent audio failed: {e2}")
 
     def generate_audio(
         self, text: str, language: str, output_path: str, use_cache: bool = True
@@ -75,7 +82,23 @@ class OpenRouterAudioGenerator:
             print(f"  [TTS] Loaded audio from cache for: '{text[:25]}...' ({language})")
             return True
 
-        url = f"{OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
+        api_key = (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("LLM_API_KEY", "").strip()
+            or self.api_key
+        )
+        base_url = os.getenv("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
+        url = f"{base_url.rstrip('/')}/audio/speech"
+
+        if not api_key:
+            print("  [TTS] OPENROUTER_API_KEY is not set. Generating silent fallback audio.")
+            self._create_silent_fallback(output_path)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
         # Resolve TTS model, voice and response format from the language
         # catalog, falling back to Kokoro + MP3 for unknown languages.
@@ -97,7 +120,7 @@ class OpenRouterAudioGenerator:
                 f"  [TTS] Cache miss. Generating {language} audio for: '{text[:30]}...' using {model}"
             )
             response = requests.post(
-                url, headers=self.headers, json=payload, stream=True, timeout=30
+                url, headers=headers, json=payload, stream=True, timeout=30
             )
 
             if response.status_code != 200:
@@ -105,7 +128,7 @@ class OpenRouterAudioGenerator:
                     f"  [TTS] API Error (Status {response.status_code}): {response.text}"
                 )
                 self._create_silent_fallback(output_path)
-                return False
+                return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
             # Save raw bytes
             temp_pcm_path = output_path + ".raw" if is_gemini else output_path
@@ -140,14 +163,16 @@ class OpenRouterAudioGenerator:
                 except subprocess.CalledProcessError as e:
                     print(f"  [TTS] FFmpeg PCM convert error: {e.stderr}")
                     self._create_silent_fallback(output_path)
-                    return False
+                    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
             # 2. Save generated file to cache
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 self.cache.save_audio_file(text, language, output_path)
+                return True
 
-            return True
+            self._create_silent_fallback(output_path)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
         except Exception as e:
             print(f"  [TTS] Exception: {e}")
             self._create_silent_fallback(output_path)
-            return False
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0

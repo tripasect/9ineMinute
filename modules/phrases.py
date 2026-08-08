@@ -35,4 +35,4 @@ class PhraseGenerator:
         pairs = self._translator.generate_and_translate(
             topic=topic, count=effective_count
         )
-        return [p["english"] for p in pairs]
+        return [p["origin"] for p in pairs]

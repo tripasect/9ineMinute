@@ -17,6 +17,15 @@ Thumbs.db
 # Project-specific caches and outputs
 cache/
 output/
+build/
+dist/
+temp/
+
+# Local bundled binaries (downloaded by CI)
+ffmpeg
+ffplay
+ffprobe
+libfribidi.dylib
 
 # Large files exceeding GitHub's 100MB limit
 background-music.mp3

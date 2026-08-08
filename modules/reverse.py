@@ -1,10 +1,10 @@
-from config import LLM_CONFIG
+from config import LLM_CONFIG, REVERSE_RATIO
 from openai import OpenAI
 import random
 
 
 class ReverseTranslator:
-    """Handles the reverse translation mode where Persian is shown first."""
+    """Handles the reverse translation mode where the target language is shown first."""
     
     def __init__(self):
         self.client = OpenAI(
@@ -12,11 +12,11 @@ class ReverseTranslator:
             api_key=LLM_CONFIG["api_key"]
         )
     
-    def reverse_translate(self, persian_text: str) -> str:
-        """Given a Persian translation, generate the English phrase."""
-        prompt = f"""Given this Persian translation, extract the original English phrase that would produce it.
-        Return ONLY the English phrase, nothing else.
-        Persian: {persian_text}"""
+    def reverse_translate(self, text: str, source_lang: str = "English") -> str:
+        """Given a translation, recover the phrase that would produce it."""
+        prompt = f"""Given this {source_lang} text, recover the original phrase that would produce it.
+        Return ONLY the phrase, nothing else.
+        Text: {text}"""
         
         response = self.client.chat.completions.create(
             model=LLM_CONFIG["model"],
@@ -26,27 +26,33 @@ class ReverseTranslator:
         
         return response.choices[0].message.content.strip()
     
-    def generate_reverse_segments(self, phrases: list[str], persian_translations: list[str]) -> list[dict]:
+    def generate_reverse_segments(
+        self,
+        origin_phrases: list[str],
+        target_translations: list[str],
+        reverse_ratio: float = REVERSE_RATIO,
+    ) -> list[dict]:
         """
-        Create reverse segments where Persian is shown first.
-        Returns list of segment dicts with 'type', 'content', and 'translation'
+        Create segments, flipping a fraction of them so the target language
+        appears first. Returns a list of segment dicts with 'type', 'content',
+        and 'translation'.
         """
-        reverse_count = int(len(phrases) * 0.15)
-        reverse_indices = set(random.sample(range(len(phrases)), reverse_count))
+        reverse_count = int(len(origin_phrases) * reverse_ratio)
+        reverse_indices = set(random.sample(range(len(origin_phrases)), reverse_count))
         
         segments = []
-        for i, phrase in enumerate(phrases):
+        for i, phrase in enumerate(origin_phrases):
             if i in reverse_indices:
                 segments.append({
                     "type": "reverse",
-                    "content": persian_translations[i],
+                    "content": target_translations[i],
                     "translation": phrase
                 })
             else:
                 segments.append({
                     "type": "normal",
                     "content": phrase,
-                    "translation": persian_translations[i]
+                    "translation": target_translations[i]
                 })
         
         return segments

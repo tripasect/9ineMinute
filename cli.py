@@ -11,6 +11,8 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from config import LANGUAGES, DEFAULT_ORIGIN_LANGUAGE, DEFAULT_TARGET_LANGUAGE
+
 
 PRESETS = {
     "9min":  {"duration": 540,  "count": 40, "label": "9-Minute Full Video"},
@@ -103,6 +105,56 @@ def select_level():
         return "any level"
 
 
+def resolve_language_code(value: str, default: str) -> str:
+    """Resolve a language code from a code or a language name."""
+    if not value:
+        return default
+    if value in LANGUAGES:
+        return value
+    lower = str(value).strip().lower()
+    for code, cfg in LANGUAGES.items():
+        if cfg["name"].lower() == lower:
+            return code
+    return default
+
+
+def select_language(prompt: str, default_code: str) -> str:
+    keys = list(LANGUAGES.keys())
+    default_idx = keys.index(default_code) + 1 if default_code in keys else 1
+    print(f"\n{prompt}")
+    for i, code in enumerate(keys, 1):
+        print(f"  [{i}]  {code} — {LANGUAGES[code]['name']}")
+    try:
+        choice = input(f"\n  Enter number [1-{len(keys)}] (default {default_idx}): ").strip()
+        if not choice:
+            return default_code
+        idx = int(choice) - 1
+        return keys[idx]
+    except (ValueError, IndexError):
+        return default_code
+
+
+def select_repetitions() -> int:
+    print("\n🔁 Phrase repetitions:")
+    print("    [0]  Origin → Translation            (default)")
+    print("    [1]  Origin → Translation → Origin again")
+    print("    [2]  Origin → Translation → Origin ×2")
+    try:
+        choice = input("\n  Enter number [0-5] (default 0): ").strip()
+        if not choice:
+            return 0
+        return max(0, min(int(choice), 5))
+    except ValueError:
+        return 0
+
+
+def select_background():
+    print("\n🖼️  Background (Enter to keep defaults):")
+    bg_image = input("  Background image path (blank = animated waves): ").strip()
+    bg_music = input("  Background music path (blank = background-music.mp3): ").strip()
+    return (bg_image or None), (bg_music or None)
+
+
 def select_settings():
     """Interactive settings menu. Returns a dict of optional feature flags."""
     print()
@@ -111,15 +163,9 @@ def select_settings():
     print("└" + "─" * 52 + "┘")
 
     settings = {}
-
-    # --- Repeat English option ---
-    print("\n  Phrase playback layout:")
-    print("    [1]  English → Persian               (default)")
-    print("    [2]  English → Persian → English again")
-    print("         (repeats English immediately after Persian)")
-
-    choice = input("\n  Enter number [1-2] (default 1): ").strip()
-    settings["repeat_english"] = choice == "2"
+    reps = select_repetitions()
+    settings["repeat_english"] = reps > 0
+    settings["repetitions"] = reps
 
     return settings
 
@@ -132,7 +178,11 @@ def confirm(preset, topic, level, output_name, count, settings):
     print(f"  Level:    {level}")
     print(f"  Phrases:  {count}")
     print(f"  Output:   output/{output_name}")
-    repeat_label = "English → Persian → English" if settings.get("repeat_english") else "English → Persian"
+    reps = settings.get("repetitions", 0)
+    if reps > 0:
+        repeat_label = f"Origin → Translation → Origin ×{reps}"
+    else:
+        repeat_label = "Origin → Translation"
     print(f"  Repeat:   {repeat_label}")
     print()
 
@@ -148,7 +198,9 @@ def build_parser():
             "Examples:\n"
             "  python cli.py                             Interactive mode\n"
             "  python cli.py -p 30s                      Quick 30s test, non-interactive\n"
-            "  python cli.py -p 9min --repeat -y         9-min video with English repeat\n"
+            "  python cli.py -p 9min --repeat -y         9-min video with origin repeat\n"
+            "  python cli.py --origin-lang en --target-lang es --repetitions 2\n"
+            "  python cli.py --background-image bg.png --background-music track.mp3\n"
             "  python cli.py -d 120 -c 15 -t \"slang\"     Custom 120s video, 15 phrases\n"
             "  python cli.py --help                      This message\n"
         ),
@@ -196,7 +248,37 @@ def build_parser():
         "--repeat", "-r",
         action="store_true",
         default=None,
-        help="Enable English → Persian → English repeat mode"
+        help="Enable origin → translation → origin repeat mode (shorthand for --repetitions 1)"
+    )
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=None,
+        help="How many times to repeat the origin phrase after the translation (0-5)"
+    )
+    parser.add_argument(
+        "--origin-lang",
+        type=str,
+        default=None,
+        help="Origin language code or name (default: en)"
+    )
+    parser.add_argument(
+        "--target-lang",
+        type=str,
+        default=None,
+        help="Target language code or name (default: fa)"
+    )
+    parser.add_argument(
+        "--background-image",
+        type=str,
+        default=None,
+        help="Path to a background image (default: animated waves)"
+    )
+    parser.add_argument(
+        "--background-music",
+        type=str,
+        default=None,
+        help="Path to background music (default: background-music.mp3)"
     )
     parser.add_argument(
         "--yes", "-y",
@@ -214,7 +296,8 @@ def build_parser():
         "--custom-phrases",
         type=str,
         default=None,
-        help="Path to a JSON file containing a list of custom English phrases"
+        help="Path to a JSON file containing a list of custom phrase pairs "
+             "(objects with 'origin'/'target' or legacy 'english'/'persian' keys)"
     )
 
     return parser
@@ -236,7 +319,9 @@ def run():
     args = build_parser().parse_args()
     has_flags = any([
         args.preset, args.duration is not None, args.count is not None,
-        args.topic, args.level, args.output, args.repeat is not None, args.custom_phrases is not None
+        args.topic, args.level, args.output, args.repeat is not None,
+        args.custom_phrases is not None, args.repetitions is not None,
+        args.origin_lang, args.target_lang, args.background_image, args.background_music
     ])
 
     if has_flags:
@@ -266,8 +351,14 @@ def run():
             except Exception:
                 phrases_count = "Custom"
                 
-        output_name = args.output if args.output else "video_english_persian.mp4"
-        settings = {"repeat_english": args.repeat or False}
+        output_name = args.output if args.output else "video_language.mp4"
+        origin_code = resolve_language_code(args.origin_lang, DEFAULT_ORIGIN_LANGUAGE)
+        target_code = resolve_language_code(args.target_lang, DEFAULT_TARGET_LANGUAGE)
+        origin_name = LANGUAGES[origin_code]["name"]
+        target_name = LANGUAGES[target_code]["name"]
+        reps = args.repetitions if args.repetitions is not None else (1 if args.repeat else 0)
+        reps = max(0, min(reps, 5))
+        settings = {"repeat_english": reps > 0, "repetitions": reps}
 
         if not args.plain:
             print_header()
@@ -279,7 +370,12 @@ def run():
         print(f"  Level:    {level}")
         print(f"  Phrases:  {phrases_count}")
         print(f"  Output:   output/{output_name}")
-        print(f"  Repeat:   {'Yes' if settings['repeat_english'] else 'No'}")
+        print(f"  Languages: {origin_name} ({origin_code}) → {target_name} ({target_code})")
+        print(f"  Repetitions: {reps}")
+        if args.background_image:
+            print(f"  Background image: {args.background_image}")
+        if args.background_music:
+            print(f"  Background music: {args.background_music}")
         print()
 
         if not args.yes:
@@ -292,26 +388,41 @@ def run():
         print("\n⚡ Launching pipeline...\n")
 
         from pipeline import ContentPipeline
-        pipeline = ContentPipeline()
+        pipeline = ContentPipeline(
+            origin_language=origin_code,
+            target_language=target_code,
+            repetitions=reps if args.repetitions is not None else None,
+            background_image=args.background_image,
+            background_music=args.background_music,
+        )
         pipeline.run(
             topic=topic_with_level,
             count=preset["count"],
             output_filename=output_name,
             duration=preset["duration"],
             repeat_english=settings["repeat_english"],
+            repetitions=settings["repetitions"],
             custom_phrases_file=args.custom_phrases,
+            origin_language=origin_code,
+            target_language=target_code,
+            background_image=args.background_image,
+            background_music=args.background_music,
         )
     else:
         # ── Interactive mode ──────────────────────────────────────────────
         print_header()
         preset = select_preset()
+        origin_code = select_language("🌍 Choose origin language (phrases are spoken in this language):", DEFAULT_ORIGIN_LANGUAGE)
+        target_code = select_language("🌐 Choose translation language:", DEFAULT_TARGET_LANGUAGE)
         settings = select_settings()
         topic = select_topic()
         level = select_level()
 
-        output_name = input("\n📁 Output filename (default: video_english_persian.mp4): ").strip()
+        output_name = input("\n📁 Output filename (default: video_language.mp4): ").strip()
         if not output_name:
-            output_name = "video_english_persian.mp4"
+            output_name = "video_language.mp4"
+
+        bg_image, bg_music = select_background()
 
         topic_with_level = f"{topic} ({level})"
 
@@ -322,14 +433,25 @@ def run():
         print("\n⚡ Launching pipeline...\n")
 
         from pipeline import ContentPipeline
-        pipeline = ContentPipeline()
+        pipeline = ContentPipeline(
+            origin_language=origin_code,
+            target_language=target_code,
+            repetitions=settings.get("repetitions"),
+            background_image=bg_image,
+            background_music=bg_music,
+        )
         pipeline.run(
             topic=topic_with_level,
             count=preset["count"],
             output_filename=output_name,
             duration=preset["duration"],
             repeat_english=settings.get("repeat_english", False),
+            repetitions=settings.get("repetitions"),
             custom_phrases_file=args.custom_phrases,
+            origin_language=origin_code,
+            target_language=target_code,
+            background_image=bg_image,
+            background_music=bg_music,
         )
 
 

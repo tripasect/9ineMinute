@@ -54,10 +54,18 @@ datas = [
 
 a = Analysis(
     ["gui.py"],
-    pathex=[],
+    pathex=[os.path.abspath(".")],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=[
+        "modules",
+        "modules.audio",
+        "modules.audio_openrouter",
+        "modules.cache",
+        "modules.phrases",
+        "modules.reverse",
+        "modules.video",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
