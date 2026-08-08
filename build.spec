@@ -43,18 +43,14 @@ elif sys.platform == "darwin":
             "Warning: libfribidi.dylib not found; Persian/Arabic text will not render correctly."
         )
 
-# Essential UI/font assets are tracked. Background music is deliberately a
-# local optional asset (it is large and ignored by git), so local builds bundle
-# it when available while CI artifacts remain fully functional without it.
+# These are required runtime assets. background-music.mp3 is tracked via
+# Git LFS so CI downloads it before PyInstaller builds the distributable.
 datas = [
     ("gui_settings.json", "."),
     ("watermark.png", "."),
+    ("background-music.mp3", "."),
     ("opensourcefont.ttf", "."),
 ]
-if os.path.exists("background-music.mp3"):
-    datas.append(("background-music.mp3", "."))
-else:
-    print("Warning: background-music.mp3 not found; building without ambient music.")
 
 a = Analysis(
     ["gui.py"],
