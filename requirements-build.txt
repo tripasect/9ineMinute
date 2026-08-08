@@ -1,0 +1,3 @@
+pyinstaller>=6.0.0
+# Optional: if you want to use imageio-ffmpeg as a fallback (though we are bundling static binaries)
+# imageio-ffmpeg>=0.4.0

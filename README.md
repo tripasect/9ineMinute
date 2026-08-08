@@ -1,6 +1,13 @@
 # 9-Minute English Content Generator
 
-A pipeline for generating bilingual English-Persian language learning videos.
+## 📥 Downloads (Desktop App)
+
+This application is available as a standalone desktop app for Windows and macOS. You do **not** need to install Python or FFmpeg manually — everything is included in the bundle.
+
+- **Windows**: [Download 9ineMinuteEnglish-Windows.exe](https://github.com/tripasect/9ineMinute/actions) (Go to latest "Build Binaries" run)
+- **macOS**: [Download 9ineMinuteEnglish-macOS-App.zip](https://github.com/tripasect/9ineMinute/actions)
+
+*Note: On first run, Windows or macOS might show a security warning because the app isn't signed. You can safely "Run anyway" or "Open anyway".*
 
 ## Overview
 
@@ -19,7 +26,7 @@ This project generates YouTube videos with the following structure:
 ## Project Structure
 
 ```
-9-minute-english/
+9ineMinute/
 ├── config.py           # Configuration constants
 ├── pipeline.py         # Main orchestrator
 ├── requirements.txt    # Python dependencies
@@ -59,6 +66,23 @@ python pipeline.py --topic "business English" --count 25
 
 # Custom output filename
 python pipeline.py -o "business-english-001.mp4"
+
+# Different language pair (Spanish → Persian)
+python pipeline.py --origin-lang es --target-lang fa
+
+# Repeat the origin phrase twice after the translation
+python pipeline.py --repetitions 2
+
+# Custom background image and music
+python pipeline.py --background-image my-bg.png --background-music my-track.mp3
+```
+
+The interactive `cli.py` prompts for languages, repetitions, and background
+options, and the same options are available as flags:
+
+```bash
+python cli.py --origin-lang en --target-lang zh --repetitions 1 \
+              --background-image bg.png --background-music music.mp3 -y
 ```
 
 ### As Python Module
@@ -66,7 +90,13 @@ python pipeline.py -o "business-english-001.mp4"
 ```python
 from pipeline import ContentPipeline
 
-pipeline = ContentPipeline()
+pipeline = ContentPipeline(
+    origin_language="en",
+    target_language="fa",
+    repetitions=2,
+    background_image="bg.png",
+    background_music="music.mp3",
+)
 video_path = pipeline.run(
     topic="travel English",
     count=20,
@@ -78,10 +108,18 @@ video_path = pipeline.run(
 
 Edit `config.py` to customize:
 
-- Video duration and phrase rate
-- TTS pause durations
-- Background audio settings
-- API configuration
+- `LANGUAGES` — language catalog: name, text direction, TTS model/voice,
+  and font for every supported origin/target language. Add new languages
+  by appending entries here.
+- `DEFAULT_ORIGIN_LANGUAGE` / `DEFAULT_TARGET_LANGUAGE` — default language pair.
+- `REVERSE_RATIO` — fraction of segments played in reverse order.
+- `VIDEO_SETTINGS` — video duration, pause durations, background music/volume,
+  background image, repetitions, resolution, fps, watermark, channel handle,
+  and text colors.
+- API configuration (`.env`).
+
+Supported languages currently include `en`, `fa`, `ar`, `es`, `fr`, `de`,
+`hi`, `ja`, `zh`. Extend `LANGUAGES` in `config.py` to add more.
 
 ## Audio Generation
 

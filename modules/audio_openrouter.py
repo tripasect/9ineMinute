@@ -1,8 +1,9 @@
 import os
 import requests
 import subprocess
-from config import OPENROUTER_API_KEY, TTS_AUDIO_MODEL
+from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, TTS_AUDIO_MODEL, TTS_KOKORO_MODEL, LANGUAGES
 from .cache import ContentCache
+from ..runtime import resolve_binary
 
 
 class OpenRouterAudioGenerator:
@@ -23,7 +24,7 @@ class OpenRouterAudioGenerator:
         """Generates a valid silent MP3 audio file using FFmpeg."""
         print(f"  [TTS] Generating silent fallback audio ({duration}s) for {output_path}...")
         cmd = [
-            "ffmpeg", "-y",
+            resolve_binary("ffmpeg"), "-y",
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
             "-t", str(duration),
             "-c:a", "libmp3lame",
@@ -44,28 +45,25 @@ class OpenRouterAudioGenerator:
             print(f"  [TTS] Loaded audio from cache for: '{text[:25]}...' ({language})")
             return True
             
-        url = "https://openrouter.ai/api/v1/audio/speech"
-        
-        # Gemini TTS specific configuration
-        is_gemini = "gemini" in self.model.lower()
-        response_format = "pcm" if is_gemini else "mp3"
-        
-        # Use Gemini's actual supported voices
-        if is_gemini:
-            # Gemini supports: Zephyr, Puck, Charon, Kore, Fenrir, Leda, Orus, Aoede, etc.
-            voice = "Charon" if language == "en" else "Zephyr"
-        else:
-            voice = "alloy" if language == "en" else "nova"
-        
+        url = f"{OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
+
+        # Resolve TTS model, voice and response format from the language
+        # catalog, falling back to Kokoro + MP3 for unknown languages.
+        lang_cfg = LANGUAGES.get(language, {})
+        model = lang_cfg.get("tts_model", TTS_KOKORO_MODEL)
+        voice = lang_cfg.get("voice", "af_sky")
+        response_format = "pcm" if lang_cfg.get("tts_format") == "pcm" else "mp3"
+        is_gemini = response_format == "pcm"
+
         payload = {
-            "model": self.model,
+            "model": model,
             "input": text,
             "voice": voice,
             "response_format": response_format
         }
         
         try:
-            print(f"  [TTS] Cache miss. Generating {language} audio for: '{text[:30]}...' using {self.model}")
+            print(f"  [TTS] Cache miss. Generating {language} audio for: '{text[:30]}...' using {model}")
             response = requests.post(
                 url, headers=self.headers, json=payload,
                 stream=True, timeout=30
@@ -86,8 +84,8 @@ class OpenRouterAudioGenerator:
             # If we downloaded raw PCM (Gemini), convert it to standard MP3 using FFmpeg
             if is_gemini:
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-f", "s16le",
+            resolve_binary("ffmpeg"), "-y",
+            "-f", "s16le",
                     "-ar", "24000",
                     "-ac", "1",
                     "-i", temp_pcm_path,

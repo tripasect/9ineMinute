@@ -2,26 +2,106 @@ import os
 import math
 import subprocess
 import textwrap
-from typing import List, Dict
+from typing import List, Dict, Optional
 from PIL import Image, ImageDraw, ImageFont
+
+from config import VIDEO_SETTINGS, LANGUAGES, BASE_DIR, OUTPUT_DIR, TEMP_DIR
+from runtime import resolve_binary
 
 
 class VideoMuxer:
     """Handles high-performance video generation with animated wave backgrounds and smooth transitions using FFmpeg pipes."""
     
-    def __init__(self):
-        self.output_dir = "/Users/tripasect/Development/9-minute-english/output"
-        self.temp_dir = "/Users/tripasect/Development/9-minute-english/temp"
+    def __init__(self, settings: dict = None):
+        merged = dict(VIDEO_SETTINGS)
+        if settings:
+            merged.update(settings)
+        self.settings = merged
+        self.output_dir = merged.get("output_dir", OUTPUT_DIR)
+        self.temp_dir = merged.get("temp_dir", TEMP_DIR)
+        self.width = int(merged.get("width", 1920))
+        self.height = int(merged.get("height", 1080))
+        self.fps = int(merged.get("fps", 25))
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
-        
+
+        # Preload background image and watermark once (if configured)
+        self._background_image = self._load_background_image(merged.get("background_image"))
+        self._watermark = self._load_watermark(merged.get("watermark"))
+        self._channel_handle = merged.get("channel_handle", "YouTube.com/@9ineMinuteEnglish")
+
+    def update_settings(self, settings: dict):
+        """Merge new settings at runtime and reload any affected assets."""
+        self.settings.update(settings)
+        if "width" in settings or "height" in settings:
+            self.width = int(self.settings.get("width", 1920))
+            self.height = int(self.settings.get("height", 1080))
+        if "fps" in settings:
+            self.fps = int(self.settings.get("fps", 25))
+        if "background_image" in settings or "width" in settings or "height" in settings:
+            self._background_image = self._load_background_image(self.settings.get("background_image"))
+        if "watermark" in settings:
+            self._watermark = self._load_watermark(self.settings.get("watermark"))
+        if "channel_handle" in settings:
+            self._channel_handle = self.settings.get("channel_handle")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_path(self, path) -> Optional[str]:
+        if not path:
+            return None
+        if os.path.exists(path):
+            return path
+        abs_path = os.path.join(BASE_DIR, path)
+        return abs_path if os.path.exists(abs_path) else None
+
+    def _load_background_image(self, path) -> Optional[Image.Image]:
+        resolved = self._resolve_path(path)
+        if not resolved:
+            return None
+        try:
+            img = Image.open(resolved).convert("RGB")
+            return img.resize((self.width, self.height), Image.LANCZOS)
+        except Exception as e:
+            print(f"  [Warning] Failed to load background image {resolved}: {e}")
+            return None
+
+    def _load_watermark(self, path) -> Optional[Image.Image]:
+        resolved = self._resolve_path(path)
+        if not resolved:
+            return None
+        try:
+            img = Image.open(resolved).convert("RGBA")
+            img.thumbnail((125, 125))
+            return img
+        except Exception as e:
+            print(f"  [Warning] Failed to load watermark {resolved}: {e}")
+            return None
+
+    def _resolve_font(self, lang_code: str, size: int):
+        cfg = LANGUAGES.get(lang_code, {})
+        candidates = [cfg.get("font")] if cfg.get("font") else []
+        candidates += [
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, size)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+    
     def get_audio_duration(self, file_path: str) -> float:
         """Get the duration of an audio file using ffprobe."""
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             return 3.0  # Fallback duration for missing/empty audio
             
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            resolve_binary("ffprobe"), "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         try:
@@ -33,33 +113,35 @@ class VideoMuxer:
 
     def draw_calming_waves(self, draw: ImageDraw.Draw, current_frame_global: int, total_frames_global: int):
         """Draws two overlapping, beautiful, and slowly moving waves at the bottom of the canvas."""
+        wave_colors = self.settings.get("wave_colors", [(30, 40, 60), (36, 50, 75)])
+        w, h = self.width, self.height
+        safe_total = max(total_frames_global, 1)
+
         # Wave 1 (Deep Indigo-Blue, translucent)
         points1 = []
-        # Use total_frames_global to ensure phase smoothly transitions across clips
-        # We want the wave to complete a cycle (e.g., 4 full cycles) over the entire video duration
-        wave_cycles_global = 4 # How many times the wave repeats its pattern over the entire video
-        phase1 = (current_frame_global / total_frames_global) * 2 * math.pi * wave_cycles_global
+        wave_cycles_global = 12  # How many times the wave repeats its pattern over the entire video
+        phase1 = (current_frame_global / safe_total) * 2 * math.pi * wave_cycles_global
 
-        for x in range(0, 1921, 20):
-            y = 880 + 35 * math.sin(0.003 * x + phase1)
+        for x in range(0, w + 1, 20):
+            y = (h - 200) + 35 * math.sin(0.003 * (w / 1920) * x + phase1)
             points1.append((x, int(y)))
-        points1.append((1920, 1080))
-        points1.append((0, 1080))
-        
+        points1.append((w, h))
+        points1.append((0, h))
+
         # Wave 2 (Lighter Teal-Blue, translucent, moving in opposition)
         points2 = []
-        wave_cycles_global_2 = 3.5 # Slightly different cycle for the second wave
-        phase2 = (current_frame_global / total_frames_global) * 2 * math.pi * wave_cycles_global_2 + 1.5 # Offset phase
+        wave_cycles_global_2 = 3.5  # Slightly different cycle for the second wave
+        phase2 = (current_frame_global / safe_total) * 2 * math.pi * wave_cycles_global_2 + 1.5  # Offset phase
 
-        for x in range(0, 1921, 20):
-            y = 910 + 25 * math.sin(0.004 * x + phase2)
+        for x in range(0, w + 1, 20):
+            y = (h - 170) + 25 * math.sin(0.004 * (w / 1920) * x + phase2)
             points2.append((x, int(y)))
-        points2.append((1920, 1080))
-        points2.append((0, 1080))
+        points2.append((w, h))
+        points2.append((0, h))
 
         # Draw waves (order: back wave then front wave)
-        draw.polygon(points1, fill=(30, 40, 60))
-        draw.polygon(points2, fill=(36, 50, 75))
+        draw.polygon(points1, fill=wave_colors[0])
+        draw.polygon(points2, fill=wave_colors[1])
 
     def create_frame_image_in_memory(
         self,
@@ -74,97 +156,95 @@ class VideoMuxer:
         total_frames_global: int,
         keep_text_visible: bool = False
     ) -> Image.Image:
-        """Generates a single frame with text (fades in/out at clip edges) and moving waves background."""
-        bg_color = (10, 11, 16)
-        img = Image.new("RGBA", (1920, 1080), color=bg_color)
+        """Generates a single frame with text (fades in at clip edges) and moving waves or a background image."""
+        bg_color = self.settings.get("background_color", (10, 11, 16))
+        w, h = self.width, self.height
+        img = Image.new("RGBA", (w, h), color=bg_color)
         draw = ImageDraw.Draw(img)
-        
-        # Draw the dynamic soothing waves first (full opacity) using global frame info
-        self.draw_calming_waves(draw, current_frame_global, total_frames_global)
-        
-        # Draw watermark (avatar PNG) in southeast corner, 3x bigger.
+
+        # Background: either a preloaded image or animated calming waves
+        if self._background_image is not None:
+            img.paste(self._background_image, (0, 0))
+            draw = ImageDraw.Draw(img)
+        else:
+            self.draw_calming_waves(draw, current_frame_global, total_frames_global)
+
+        # Draw watermark in the southeast corner
         margin = 40
-        avatar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "watermark.png")
-        if os.path.exists(avatar_path):
-            try:
-                avatar = Image.open(avatar_path).convert("RGBA")
-                avatar.thumbnail((125, 125))
-                img.paste(avatar, (1920 - margin - avatar.width, 1080 - margin - avatar.height), avatar)
-            except Exception:
-                pass
-        
-        # Draw channel handle in bottom-left corner
+        if self._watermark is not None:
+            img.paste(
+                self._watermark,
+                (w - margin - self._watermark.width, h - margin - self._watermark.height),
+                self._watermark,
+            )
+
+        # Draw channel handle in the bottom-left corner
         try:
-            handle_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 22)
+            handle_font = ImageFont.truetype(
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                max(16, int(22 * h / 1080))
+            )
         except Exception:
             handle_font = ImageFont.load_default()
-        draw.text((margin, 1080 - margin), "YouTube.com/@9ineMinuteEnglish", fill=(180, 180, 180, 120), font=handle_font, anchor="ld")
-        
-        # Text fades in over the first 0.5s, then stays fully visible for the entire clip.
-        fade_duration_frames = 12  # ~0.5 second fade-in
-        
+        draw.text(
+            (margin, h - margin), self._channel_handle,
+            fill=(180, 180, 180, 120), font=handle_font, anchor="ld"
+        )
+
+        # Text fades in over the first `fade_duration` seconds
+        fade_duration_frames = max(1, int(self.fps * self.settings.get("fade_duration", 0.5)))
         if frame_idx_in_clip < fade_duration_frames:
             alpha = int(255 * (frame_idx_in_clip / fade_duration_frames))
         else:
             alpha = 255
-            
-        # Load premium system fonts
-        font_name_en = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
-        font_name_fa = "/System/Library/Fonts/SFArabic.ttf"
-        
-        try:
-            font_title_en = ImageFont.truetype(font_name_en, 68)   # 54 * 1.25 ≈ 68
-            font_sub_en = ImageFont.truetype(font_name_en, 53)     # 42 * 1.25 ≈ 53
-        except Exception:
-            font_title_en = ImageFont.load_default()
-            font_sub_en = ImageFont.load_default()
 
-        try:
-            font_title_fa = ImageFont.truetype(font_name_fa, 88)   # 50 * 1.75 ≈ 88
-            font_sub_fa = ImageFont.truetype(font_name_fa, 70)     # 40 * 1.75 ≈ 70
-        except Exception:
-            font_title_fa = ImageFont.load_default()
-            font_sub_fa = ImageFont.load_default()
+        scale = h / 1080.0
 
-        # Text wrap and RTL shape helper (wrapping BEFORE shaping to preserve letter context)
+        def _font_size(lang: str, rtl_size: int, ltr_size: int) -> int:
+            is_rtl = LANGUAGES.get(lang, {}).get("direction") == "rtl"
+            return int((rtl_size if is_rtl else ltr_size) * scale)
+
+        # Text wrap helper (wrapping BEFORE shaping preserves letter context)
         def prepare_text_lines(text: str, lang: str) -> List[str]:
             if not text:
                 return []
-            # Width should be adjusted for font size and character density
-            wrap_width = 35 if lang == "fa" else 42
+            is_rtl = LANGUAGES.get(lang, {}).get("direction") == "rtl"
+            wrap_width = 35 if is_rtl else 42
             return textwrap.wrap(text, width=wrap_width)
 
-        # Map to correct fonts and wrap lines
-        font_primary = font_title_fa if primary_lang == "fa" else font_title_en
-        font_secondary = font_sub_fa if secondary_lang == "fa" else font_sub_en
-        
+        font_primary = self._resolve_font(primary_lang, _font_size(primary_lang, 88, 68))
+        font_secondary = self._resolve_font(secondary_lang, _font_size(secondary_lang, 70, 53))
+
         primary_lines = prepare_text_lines(primary_text, primary_lang)
         secondary_lines = prepare_text_lines(secondary_text, secondary_lang)
 
-        # Colors with alpha for fading
-        color_white = (245, 245, 247, alpha)
-        color_gold = (120, 180, 255, alpha)  # Light blue for Persian
-        
+        # Colors (with alpha for fading)
+        text_colors = self.settings.get("text_colors", {})
+        color_primary = tuple(text_colors.get("primary", (245, 245, 247)))
+        color_secondary = tuple(text_colors.get("secondary", (120, 180, 255)))
+        fill_primary = color_primary[:3] + (alpha,)
+        fill_secondary = color_secondary[:3] + (alpha,)
+
         # Calculate total text block height
-        line_height_primary = 85
-        line_height_secondary = 65
-        gap = 30
-        
+        line_height_primary = int(85 * scale)
+        line_height_secondary = int(65 * scale)
+        gap = int(30 * scale)
+
         total_height = len(primary_lines) * line_height_primary
         if secondary_lines:
             total_height += gap + len(secondary_lines) * line_height_secondary
-            
-        start_y = (1000 - total_height) // 2
+
+        start_y = (h - total_height) // 2
 
         # Draw primary text lines with perfect centering and native RTL support
         y = start_y
         for line in primary_lines:
-            dir_str = "rtl" if primary_lang == "fa" else "ltr"
+            dir_str = "rtl" if LANGUAGES.get(primary_lang, {}).get("direction") == "rtl" else "ltr"
             bbox = draw.textbbox((0, 0), line, font=font_primary, direction=dir_str)
             text_width = bbox[2] - bbox[0]
-            x = (1920 - text_width) // 2
+            x = (w - text_width) // 2
             draw.text(
-                (x, y), line, fill=color_white, font=font_primary,
+                (x, y), line, fill=fill_primary, font=font_primary,
                 direction=dir_str
             )
             y += line_height_primary
@@ -173,17 +253,17 @@ class VideoMuxer:
         if secondary_lines:
             y += gap
             for line in secondary_lines:
-                dir_str = "rtl" if secondary_lang == "fa" else "ltr"
+                dir_str = "rtl" if LANGUAGES.get(secondary_lang, {}).get("direction") == "rtl" else "ltr"
                 bbox = draw.textbbox((0, 0), line, font=font_secondary, direction=dir_str)
                 text_width = bbox[2] - bbox[0]
-                x = (1920 - text_width) // 2
+                x = (w - text_width) // 2
                 draw.text(
-                    (x, y), line, fill=color_gold, font=font_secondary,
+                    (x, y), line, fill=fill_secondary, font=font_secondary,
                     direction=dir_str
                 )
                 y += line_height_secondary
 
-        return img.convert("RGB") # FFmpeg expects RGB for rawvideo input
+        return img.convert("RGB")  # FFmpeg expects RGB for rawvideo input
 
     def create_video_clip(
         self,
@@ -203,7 +283,7 @@ class VideoMuxer:
         Text remains on screen for the entire clip duration, fading in at the start
         and fading out at the end while the wave keeps looping.
         """
-        fps = 25
+        fps = self.fps
         total_frames_in_clip = int(total_duration * fps)
         audio_dur = self.get_audio_duration(audio_path)
         audio_duration_frames = int(audio_dur * fps)
@@ -223,8 +303,8 @@ class VideoMuxer:
             filter_complex_str = f"[1:a]apad,aresample=44100,afade=t=in:st=0:d={fade_dur},afade=t=out:st={fade_out_start:.3f}:d={fade_dur}[outa]"
 
         cmd = [
-            "ffmpeg", "-y",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1920x1080", "-r", "25",
+            resolve_binary("ffmpeg"), "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.width}x{self.height}", "-r", str(fps),
             "-i", "-",
             *audio_source_cmd,
             *([ "-filter_complex", filter_complex_str ] if filter_complex_str else []),
@@ -272,12 +352,12 @@ class VideoMuxer:
         Creates a smooth transitions/silence gap clip with slowly moving waves and absolute silence.
         No text or text fading is applied.
         """
-        fps = 25
+        fps = self.fps
         total_frames_in_clip = int(duration * fps)
         
         cmd = [
-            "ffmpeg", "-y",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "1920x1080", "-r", "25",
+            resolve_binary("ffmpeg"), "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.width}x{self.height}", "-r", str(fps),
             "-i", "-",
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
             "-map", "0:v", "-map", "1:a",
@@ -313,7 +393,7 @@ class VideoMuxer:
 
     def _get_duration(self, file_path: str) -> float:
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            resolve_binary("ffprobe"), "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         try:
@@ -354,7 +434,7 @@ class VideoMuxer:
         # Actually since we set -ar 44100 on all clips uniformly, maybe concat works better?
         # A safer option to eliminate pop is re-encoding audio with a tiny crossfade or simply re-encoding.
         concat_cmd = [
-            "ffmpeg", "-y",
+            resolve_binary("ffmpeg"), "-y",
             "-f", "concat", "-safe", "0",
             "-i", concat_list_path,
             "-c:v", "copy",
@@ -375,11 +455,12 @@ class VideoMuxer:
         has_ambient = ambient_audio and os.path.exists(ambient_audio)
 
         if has_ambient:
+            bg_volume = self.settings.get("background_audio_volume", 0.3)
             print(f"  [Muxer] Mixing ambient audio: {ambient_audio}...")
             filter_complex = (
                 f"[0:a]afade=t=in:st=0:d={fade_dur},"
                 f"afade=t=out:st={fade_out_start:.2f}:d={fade_dur}[speech];"
-                f"[1:a]volume=0.3[bg];"
+                f"[1:a]volume={bg_volume}[bg];"
                 f"[speech][bg]amix=inputs=2:duration=first:dropout_transition=0.5[outa]"
             )
             inputs = ["-i", temp_merged_video, "-stream_loop", "-1", "-i", ambient_audio]
@@ -392,7 +473,7 @@ class VideoMuxer:
             inputs = ["-i", temp_merged_video]
 
         mix_cmd = [
-            "ffmpeg", "-y",
+            resolve_binary("ffmpeg"), "-y",
             *inputs,
             "-filter_complex", filter_complex,
             "-map", "0:v", "-map", "[outa]",

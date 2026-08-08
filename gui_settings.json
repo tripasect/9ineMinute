@@ -1,0 +1,42 @@
+{
+  "content": {
+    "preset": "30 s (test)",
+    "duration": 30,
+    "count": 2,
+    "topic": "pivotal English phrases",
+    "level": "any level",
+    "origin_lang": "en",
+    "target_lang": "fa",
+    "repetitions": 1,
+    "reverse_ratio": 0.15,
+    "output": "test.mp4",
+    "custom_phrases": "",
+    "background_image": "",
+    "background_music": "background-music.mp3",
+    "watermark": "watermark.png",
+    "width": 1920,
+    "height": 1080,
+    "fps": 25,
+    "pause_duration": 2.0,
+    "phrase_gap_duration": 2.0,
+    "repeat_pause_duration": 2.0,
+    "background_audio_volume": 0.3,
+    "fade_duration": 0.5,
+    "channel_handle": "YouTube.com/@9ineMinuteEnglish",
+    "output_dir": "/Users/tripasect/Desktop"
+  },
+  "video_settings": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 25,
+    "pause_duration": 2.0,
+    "phrase_gap_duration": 2.0,
+    "repeat_pause_duration": 2.0,
+    "background_audio_volume": 0.3,
+    "fade_duration": 0.5,
+    "channel_handle": "YouTube.com/@9ineMinuteEnglish",
+    "watermark": "watermark.png",
+    "output_dir": "/Users/tripasect/Desktop"
+  },
+  "reverse_ratio": 0.15
+}
