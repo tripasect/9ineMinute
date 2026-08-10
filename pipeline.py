@@ -18,6 +18,10 @@ import subprocess
 import sys
 from typing import Dict, List
 
+# Ensure UTF-8 encoding for stdout on Windows to avoid Unicode issues
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # Add modules to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -518,10 +522,10 @@ class ContentPipeline:
         )
 
         print(f"\n{'=' * 60}")
-        print("🎉 Video generated successfully!")
-        print(f"🎬 Location: {final_video_path}")
+        print("Video generated successfully!")
+        print(f"Location: {final_video_path}")
         print(
-            f"⏱️  Duration: {current_duration:.1f}s ({current_duration / 60:.1f} mins)"
+            f"Duration: {current_duration:.1f}s ({current_duration / 60:.1f} mins)"
         )
         print(f"{'=' * 60}")
 

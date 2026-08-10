@@ -16,6 +16,12 @@ import threading
 
 from runtime import app_data_dir, bundle_dir, ensure_seeded, resolve_binary
 
+# Windows-specific flag to suppress console windows
+if sys.platform == "win32":
+    CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+else:
+    CREATE_NO_WINDOW = 0
+
 # When frozen (PyInstaller), sys.executable is this very app and there is no
 # loose pipeline.py file on disk to shell out to — everything is bundled
 # inside the single executable. To keep the "separate process + live log
@@ -992,6 +998,7 @@ class App:
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW,
                 )
         except Exception as exc:
             messagebox.showerror("Playback failed", str(exc), parent=self.root)
@@ -1336,6 +1343,7 @@ class App:
                     bufsize=1,
                     encoding="utf-8",
                     errors="replace",
+                    creationflags=CREATE_NO_WINDOW,
                 )
                 for line in proc.stdout:
                     self.log_queue.put(line.rstrip())
@@ -1406,7 +1414,7 @@ class App:
         elif os.name == "nt":
             os.startfile(output_dir)
         else:
-            subprocess.Popen(["xdg-open", output_dir])
+            subprocess.Popen(["xdg-open", output_dir], creationflags=CREATE_NO_WINDOW)
 
     def _open_path(self, rel):
         path = os.path.join(BASE_DIR, rel)
@@ -1417,7 +1425,7 @@ class App:
         elif os.name == "nt":
             os.startfile(path)
         else:
-            subprocess.Popen(["xdg-open", path])
+            subprocess.Popen(["xdg-open", path], creationflags=CREATE_NO_WINDOW)
 
 
 def main():

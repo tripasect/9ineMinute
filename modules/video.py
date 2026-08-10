@@ -7,6 +7,12 @@ from typing import Dict, List, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Windows-specific flag to suppress console windows
+if sys.platform == "win32":
+    CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+else:
+    CREATE_NO_WINDOW = 0
+
 from config import BASE_DIR, LANGUAGES, OUTPUT_DIR, TEMP_DIR, VIDEO_SETTINGS
 from runtime import bundle_dir, resolve_binary
 
@@ -154,7 +160,9 @@ class VideoMuxer:
             file_path,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+            )
             return float(result.stdout.strip())
         except Exception as e:
             print(f"  [Warning] Failed to get duration for {file_path}: {e}")
@@ -421,12 +429,13 @@ class VideoMuxer:
             output_path,
         ]
 
-        try:
+         try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
             )
 
             # Write frames directly to pipe
@@ -511,12 +520,13 @@ class VideoMuxer:
             output_path,
         ]
 
-        try:
+         try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
             )
 
             # Write frames, passing global frame info for continuous wave animation
@@ -554,7 +564,9 @@ class VideoMuxer:
             file_path,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+            )
             return float(result.stdout.strip())
         except Exception:
             return 0.0
@@ -611,7 +623,9 @@ class VideoMuxer:
         ]
 
         try:
-            subprocess.run(concat_cmd, capture_output=True, text=True, check=True)
+            subprocess.run(
+                concat_cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+            )
         except subprocess.CalledProcessError as e:
             print(f"  [Error] FFmpeg concat failed: {e.stderr}")
             raise RuntimeError(f"FFmpeg concat failed: {e.stderr}")
@@ -671,6 +685,7 @@ class VideoMuxer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=True,
+                creationflags=CREATE_NO_WINDOW,
             )
             print(f"  [Muxer] Completed final video with global fade-in/out.")
             return final_output_path
