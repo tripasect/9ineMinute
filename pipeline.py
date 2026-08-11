@@ -40,6 +40,8 @@ from modules.reverse import ReverseTranslator
 from modules.translator import PhraseTranslator
 from modules.video import VideoMuxer
 from runtime import bundle_dir
+# Ensure bundled modules are on sys.path for frozen builds
+sys.path.insert(0, bundle_dir())
 
 # Hard-coded sample phrases used by --preview so a dry-run never touches
 # the LLM or TTS APIs.
