@@ -429,7 +429,7 @@ class VideoMuxer:
             output_path,
         ]
 
-         try:
+        try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -520,7 +520,7 @@ class VideoMuxer:
             output_path,
         ]
 
-         try:
+        try:
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
