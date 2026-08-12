@@ -124,6 +124,14 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f -name "*" | sort
 
+      - name: Prepare release files
+        run: |
+          # Move files to flat structure for release
+          mkdir -p release-files
+          cp artifacts/9ineMinuteEnglish-Windows.exe/9ineMinuteEnglish-Windows.exe release-files/
+          cp artifacts/9ineMinuteEnglish-macOS/9ineMinuteEnglish-macOS release-files/
+          cp artifacts/9ineMinuteEnglish-macOS/9ineMinuteEnglish-macOS-App.zip release-files/
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -133,8 +141,8 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            artifacts/9ineMinuteEnglish-Windows.exe
-            artifacts/9ineMinuteEnglish-macOS
-            artifacts/9ineMinuteEnglish-macOS-App.zip
+            release-files/9ineMinuteEnglish-Windows.exe
+            release-files/9ineMinuteEnglish-macOS
+            release-files/9ineMinuteEnglish-macOS-App.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
