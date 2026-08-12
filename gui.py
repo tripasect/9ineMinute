@@ -608,7 +608,12 @@ class App:
         self.reps_var = tk.IntVar(
             value=g.get("repetitions", VIDEO_SETTINGS.get("repetitions", 0))
         )
-        self._labeled_row(left, "Repetitions (0–5)", self.reps_var, 0, 5)
+        self._labeled_row(left, "Origin repetitions (0–5)", self.reps_var, 0, 5)
+
+        self.target_reps_var = tk.IntVar(
+            value=g.get("target_repetitions", VIDEO_SETTINGS.get("target_repetitions", 0))
+        )
+        self._labeled_row(left, "Target repetitions (0–5)", self.target_reps_var, 0, 5)
 
         self.reverse_var = tk.DoubleVar(value=g.get("reverse_ratio", REVERSE_RATIO))
         rev_row = self._labeled_row(left, "Reverse ratio")
@@ -1147,6 +1152,7 @@ class App:
             "origin_lang": self.origin_var.get(),
             "target_lang": self.target_var.get(),
             "repetitions": int(self.reps_var.get()),
+            "target_repetitions": int(self.target_reps_var.get()),
             "reverse_ratio": round(float(self.reverse_var.get()), 3),
             "output": self.output_var.get().strip() or "video_language.mp4",
             "custom_phrases": self.custom_phrases_var.get().strip(),
@@ -1258,6 +1264,8 @@ class App:
             target,
             "--repetitions",
             str(g["repetitions"]),
+            "--target-repetitions",
+            str(g["target_repetitions"]),
             "--output",
             g["output"],
             "--settings",
@@ -1309,6 +1317,8 @@ class App:
             target,
             "--repetitions",
             str(g["repetitions"]),
+            "--target-repetitions",
+            str(g["target_repetitions"]),
             "--output",
             "preview.mp4",
             "--settings",

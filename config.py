@@ -46,6 +46,7 @@ VIDEO_SETTINGS: dict = {
     "background_audio_volume": 0.3,
     "background_image": None,
     "repetitions": 0,
+    "target_repetitions": 0,
     "width": 1920,
     "height": 1080,
     "fps": 25,

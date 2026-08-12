@@ -67,7 +67,8 @@ class ContentPipeline:
         self,
         origin_language: str = None,
         target_language: str = None,
-        repetitions: int = None,
+        origin_repetitions: int = None,
+        target_repetitions: int = None,
         background_image: str = None,
         background_music: str = None,
         settings: dict = None,
@@ -75,10 +76,15 @@ class ContentPipeline:
     ):
         self.origin_language = origin_language or DEFAULT_ORIGIN_LANGUAGE
         self.target_language = target_language or DEFAULT_TARGET_LANGUAGE
-        self.repetitions = (
-            repetitions
-            if repetitions is not None
+        self.origin_repetitions = (
+            origin_repetitions
+            if origin_repetitions is not None
             else VIDEO_SETTINGS.get("repetitions", 0)
+        )
+        self.target_repetitions = (
+            target_repetitions
+            if target_repetitions is not None
+            else VIDEO_SETTINGS.get("target_repetitions", 0)
         )
         self.background_music = background_music
         self.settings = dict(settings or {})
@@ -113,6 +119,7 @@ class ContentPipeline:
         duration: int = None,
         repeat_english: bool = False,
         repetitions: int = None,
+        target_repetitions: int = None,
         custom_phrases_file: str = None,
         origin_language: str = None,
         target_language: str = None,
@@ -132,6 +139,9 @@ class ContentPipeline:
             repetitions: How many times to repeat the origin-language phrase after
                 the translation (origin → target → origin × N). Applies only to
                 normal (non-reverse) segments. Overrides repeat_english when > 0.
+            target_repetitions: How many times to repeat the target-language phrase after
+                the origin phrase (origin → target → target × N). Applies only to
+                normal (non-reverse) segments.
             custom_phrases_file: Path to a JSON file of phrase pairs. Each item may
                 use 'origin'/'target' keys or the legacy 'english'/'persian' keys.
             origin_language: Language code (or name) of the phrase language.
@@ -157,10 +167,13 @@ class ContentPipeline:
             )
             target_code = DEFAULT_TARGET_LANGUAGE
 
-        reps = repetitions if repetitions is not None else self.repetitions
+        origin_reps = repetitions if repetitions is not None else self.origin_repetitions
         if repeat_english:
-            reps = max(reps, 1)
-        reps = max(0, reps)
+            origin_reps = max(origin_reps, 1)
+        origin_reps = max(0, origin_reps)
+
+        target_reps = target_repetitions if target_repetitions is not None else self.target_repetitions
+        target_reps = max(0, target_reps)
 
         if background_image:
             self.video_muxer.update_settings({"background_image": background_image})
@@ -175,7 +188,8 @@ class ContentPipeline:
         print("=" * 60)
         print(f"  Origin language : {origin_name} ({origin_code})")
         print(f"  Target language : {target_name} ({target_code})")
-        print(f"  Repetitions     : {reps}")
+        print(f"  Origin repetitions : {origin_reps}")
+        print(f"  Target repetitions : {target_reps}")
 
         # Step 1: Generate phrases + translations in one LLM call
         if custom_phrases_file:
@@ -458,8 +472,8 @@ class ContentPipeline:
 
                 # Optional repeat clips: origin phrase repeated with the target
                 # translation kept visible. Only applies to normal segments.
-                if reps > 0 and not is_reverse:
-                    for rep in range(reps):
+                if origin_reps > 0 and not is_reverse:
+                    for rep in range(origin_reps):
                         clip_path_3 = os.path.join(
                             TEMP_DIR, f"clip_{seg_id}_s3r{rep}.mov"
                         )
@@ -481,6 +495,36 @@ class ContentPipeline:
                         if not success_3:
                             raise RuntimeError(
                                 f"Failed to create the repeated origin-language clip for segment {i + 1}."
+                            )
+                        clip_paths.append(clip_path_3)
+                        current_duration += dur_3
+                        current_frame_global_offset += int(dur_3 * fps)
+
+                # Optional repeat clips: target phrase repeated with the origin
+                # translation kept visible. Only applies to normal segments.
+                if target_reps > 0 and not is_reverse:
+                    for rep in range(target_reps):
+                        clip_path_3 = os.path.join(
+                            TEMP_DIR, f"clip_{seg_id}_s3t{rep}.mov"
+                        )
+                        dur_3 = (
+                            self.video_muxer.get_audio_duration(audio_2) + repeat_pause
+                        )
+                        success_3 = self.video_muxer.create_video_clip(
+                            primary_text=txt_2_2,
+                            secondary_text=txt_1,  # keep origin translation visible below
+                            primary_lang=lang_2_2,
+                            secondary_lang=lang_1,
+                            audio_path=audio_2,
+                            total_duration=dur_3,
+                            output_path=clip_path_3,
+                            current_frame_global_offset=current_frame_global_offset,
+                            total_frames_global=estimated_total_frames_global,
+                            keep_text_visible=True,  # keep text on screen for the repeat
+                        )
+                        if not success_3:
+                            raise RuntimeError(
+                                f"Failed to create the repeated target-language clip for segment {i + 1}."
                             )
                         clip_paths.append(clip_path_3)
                         current_duration += dur_3
@@ -606,6 +650,13 @@ def main():
     )
 
     parser.add_argument(
+        "--target-repetitions",
+        type=int,
+        default=None,
+        help="How many times to repeat the target phrase after the origin phrase",
+    )
+
+    parser.add_argument(
         "--origin-lang",
         type=str,
         default=None,
@@ -721,7 +772,8 @@ def main():
     pipeline = ContentPipeline(
         origin_language=args.origin_lang,
         target_language=args.target_lang,
-        repetitions=args.repetitions,
+        origin_repetitions=args.repetitions,
+        target_repetitions=args.target_repetitions,
         background_image=args.background_image,
         background_music=args.background_music,
         settings=settings,
@@ -734,6 +786,7 @@ def main():
         duration=args.duration,
         repeat_english=args.repeat,
         repetitions=args.repetitions,
+        target_repetitions=args.target_repetitions,
         custom_phrases_file=args.custom_phrases,
         origin_language=args.origin_lang,
         target_language=args.target_lang,

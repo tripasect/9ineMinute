@@ -135,10 +135,24 @@ def select_language(prompt: str, default_code: str) -> str:
 
 
 def select_repetitions() -> int:
-    print("\n🔁 Phrase repetitions:")
+    print("\n🔁 Origin phrase repetitions (after translation):")
     print("    [0]  Origin → Translation            (default)")
     print("    [1]  Origin → Translation → Origin again")
     print("    [2]  Origin → Translation → Origin ×2")
+    try:
+        choice = input("\n  Enter number [0-5] (default 0): ").strip()
+        if not choice:
+            return 0
+        return max(0, min(int(choice), 5))
+    except ValueError:
+        return 0
+
+
+def select_target_repetitions() -> int:
+    print("\n🔁 Target phrase repetitions (after origin):")
+    print("    [0]  Origin → Translation            (default)")
+    print("    [1]  Origin → Translation → Translation again")
+    print("    [2]  Origin → Translation → Translation ×2")
     try:
         choice = input("\n  Enter number [0-5] (default 0): ").strip()
         if not choice:
@@ -163,9 +177,11 @@ def select_settings():
     print("└" + "─" * 52 + "┘")
 
     settings = {}
-    reps = select_repetitions()
-    settings["repeat_english"] = reps > 0
-    settings["repetitions"] = reps
+    origin_reps = select_repetitions()
+    target_reps = select_target_repetitions()
+    settings["repeat_english"] = origin_reps > 0
+    settings["repetitions"] = origin_reps
+    settings["target_repetitions"] = target_reps
 
     return settings
 
@@ -178,12 +194,18 @@ def confirm(preset, topic, level, output_name, count, settings):
     print(f"  Level:    {level}")
     print(f"  Phrases:  {count}")
     print(f"  Output:   output/{output_name}")
-    reps = settings.get("repetitions", 0)
-    if reps > 0:
-        repeat_label = f"Origin → Translation → Origin ×{reps}"
+    origin_reps = settings.get("repetitions", 0)
+    target_reps = settings.get("target_repetitions", 0)
+    if origin_reps > 0:
+        origin_label = f"Origin → Translation → Origin ×{origin_reps}"
     else:
-        repeat_label = "Origin → Translation"
-    print(f"  Repeat:   {repeat_label}")
+        origin_label = "Origin → Translation"
+    if target_reps > 0:
+        target_label = f"Origin → Translation → Translation ×{target_reps}"
+    else:
+        target_label = "Origin → Translation"
+    print(f"  Origin repeats:  {origin_label}")
+    print(f"  Target repeats:  {target_label}")
     print()
 
     ans = input("🚀 Generate? [Y/n]: ").strip().lower()
@@ -255,6 +277,12 @@ def build_parser():
         type=int,
         default=None,
         help="How many times to repeat the origin phrase after the translation (0-5)"
+    )
+    parser.add_argument(
+        "--target-repetitions",
+        type=int,
+        default=None,
+        help="How many times to repeat the target phrase after the origin phrase (0-5)"
     )
     parser.add_argument(
         "--origin-lang",
@@ -356,9 +384,11 @@ def run():
         target_code = resolve_language_code(args.target_lang, DEFAULT_TARGET_LANGUAGE)
         origin_name = LANGUAGES[origin_code]["name"]
         target_name = LANGUAGES[target_code]["name"]
-        reps = args.repetitions if args.repetitions is not None else (1 if args.repeat else 0)
-        reps = max(0, min(reps, 5))
-        settings = {"repeat_english": reps > 0, "repetitions": reps}
+        origin_reps = args.repetitions if args.repetitions is not None else (1 if args.repeat else 0)
+        origin_reps = max(0, min(origin_reps, 5))
+        target_reps = args.target_repetitions if args.target_repetitions is not None else 0
+        target_reps = max(0, min(target_reps, 5))
+        settings = {"repeat_english": origin_reps > 0, "repetitions": origin_reps, "target_repetitions": target_reps}
 
         if not args.plain:
             print_header()
@@ -371,7 +401,8 @@ def run():
         print(f"  Phrases:  {phrases_count}")
         print(f"  Output:   output/{output_name}")
         print(f"  Languages: {origin_name} ({origin_code}) → {target_name} ({target_code})")
-        print(f"  Repetitions: {reps}")
+        print(f"  Origin repetitions: {origin_reps}")
+        print(f"  Target repetitions: {target_reps}")
         if args.background_image:
             print(f"  Background image: {args.background_image}")
         if args.background_music:
@@ -391,7 +422,8 @@ def run():
         pipeline = ContentPipeline(
             origin_language=origin_code,
             target_language=target_code,
-            repetitions=reps if args.repetitions is not None else None,
+            origin_repetitions=origin_reps if args.repetitions is not None else None,
+            target_repetitions=target_reps if args.target_repetitions is not None else None,
             background_image=args.background_image,
             background_music=args.background_music,
         )
@@ -402,6 +434,7 @@ def run():
             duration=preset["duration"],
             repeat_english=settings["repeat_english"],
             repetitions=settings["repetitions"],
+            target_repetitions=settings["target_repetitions"],
             custom_phrases_file=args.custom_phrases,
             origin_language=origin_code,
             target_language=target_code,
@@ -436,7 +469,8 @@ def run():
         pipeline = ContentPipeline(
             origin_language=origin_code,
             target_language=target_code,
-            repetitions=settings.get("repetitions"),
+            origin_repetitions=settings.get("repetitions"),
+            target_repetitions=settings.get("target_repetitions"),
             background_image=bg_image,
             background_music=bg_music,
         )
@@ -447,6 +481,7 @@ def run():
             duration=preset["duration"],
             repeat_english=settings.get("repeat_english", False),
             repetitions=settings.get("repetitions"),
+            target_repetitions=settings.get("target_repetitions"),
             custom_phrases_file=args.custom_phrases,
             origin_language=origin_code,
             target_language=target_code,
