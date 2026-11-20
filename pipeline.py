@@ -304,22 +304,25 @@ class ContentPipeline:
             # of a regular run. A failed request must stop generation instead
             # of allowing fallback/silent audio to produce a false success.
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [
+                future_tasks = {
                     executor.submit(
                         self.audio_gen.generate_audio,
                         text,
                         lang,
                         path,
                         use_cache=not self.preview,
-                    )
+                    ): (text, lang)
                     for text, lang, path in audio_tasks
-                ]
+                }
+                futures = list(future_tasks)
                 try:
                     for future in concurrent.futures.as_completed(futures, timeout=180):
                         try:
                             if not future.result(timeout=1):
+                                text, lang = future_tasks[future]
                                 raise RuntimeError(
-                                    "TTS provider did not generate an audio file."
+                                    f"TTS failed for {lang} audio '{text[:40]}'. "
+                                    "See the provider error above and check the selected model/voice."
                                 )
                         except Exception as e:
                             for pending in futures:
