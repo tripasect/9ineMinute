@@ -29,7 +29,6 @@ from config import (
     DEFAULT_ORIGIN_LANGUAGE,
     DEFAULT_TARGET_LANGUAGE,
     LANGUAGES,
-    OPENROUTER_API_KEY,
     OUTPUT_DIR,
     REVERSE_RATIO,
     TEMP_DIR,
@@ -94,9 +93,9 @@ class ContentPipeline:
         if background_image:
             muxer_settings["background_image"] = background_image
 
-        self.phrase_translator = PhraseTranslator(api_key=OPENROUTER_API_KEY)
+        self.phrase_translator = PhraseTranslator()
         self.reverse_gen = ReverseTranslator()
-        self.audio_gen = AudioGenerator(TEMP_DIR)
+        self.audio_gen = AudioGenerator(TEMP_DIR, origin_language=self.origin_language)
         self.video_muxer = VideoMuxer(settings=muxer_settings)
 
     def _resolve_language(self, value: str) -> str:
@@ -126,6 +125,7 @@ class ContentPipeline:
         background_image: str = None,
         background_music: str = None,
         reverse_ratio: float = None,
+        content_mode: str = "phrase",
     ) -> str:
         """
         Run the complete pipeline from phrase generation to final video.
@@ -156,6 +156,10 @@ class ContentPipeline:
         """
         origin_code = self._resolve_language(origin_language or self.origin_language)
         target_code = self._resolve_language(target_language or self.target_language)
+        content_mode = (content_mode or "phrase").strip().lower()
+        if content_mode not in {"word", "phrase"}:
+            raise ValueError("content_mode must be 'word' or 'phrase'")
+        item_name = "words" if content_mode == "word" else "phrases"
         if not origin_code or origin_code not in LANGUAGES:
             print(
                 f"  [Warning] Unknown origin language '{origin_language}', falling back to '{DEFAULT_ORIGIN_LANGUAGE}'."
@@ -191,7 +195,7 @@ class ContentPipeline:
         print(f"  Origin repetitions : {origin_reps}")
         print(f"  Target repetitions : {target_reps}")
 
-        # Step 1: Generate phrases + translations in one LLM call
+        # Step 1: Generate selected content + translations in one LLM call
         if custom_phrases_file:
             print(
                 f"\n[1/5] Loading custom phrases and translations from {custom_phrases_file}..."
@@ -225,19 +229,20 @@ class ContentPipeline:
                 f"  Loaded {len(phrases)} custom phrase+translation pairs (LLM bypassed)."
             )
         else:
-            print("\n[1/5] Generating phrases and translations (unified call)...")
+            print(f"\n[1/5] Generating {item_name} and translations (unified call)...")
             pairs = self.phrase_translator.generate_and_translate(
                 topic=topic,
                 count=count,
                 origin_lang=origin_code,
                 target_lang=target_code,
+                content_mode=content_mode,
             )
             if not pairs:
                 print("  [Error] No phrase pairs generated.")
                 sys.exit(1)
             phrases = [p["origin"] for p in pairs]
             target_translations = [p["target"] for p in pairs]
-            print(f"  Generated {len(phrases)} phrase+translation pairs.")
+            print(f"  Generated {len(phrases)} {item_name.rstrip('s')}+translation pairs.")
 
         # Step 2 is now merged into Step 1 — kept as a no-op label for clarity
         print("\n[2/5] Translations ready (included in unified call).")
@@ -298,7 +303,7 @@ class ContentPipeline:
             # Preview deliberately uses real TTS so it is an accurate sample
             # of a regular run. A failed request must stop generation instead
             # of allowing fallback/silent audio to produce a false success.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
                     executor.submit(
                         self.audio_gen.generate_audio,
@@ -309,14 +314,23 @@ class ContentPipeline:
                     )
                     for text, lang, path in audio_tasks
                 ]
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        if not future.result():
-                            raise RuntimeError(
-                                "TTS provider did not generate an audio file."
-                            )
-                    except Exception as e:
-                        raise RuntimeError(f"Audio generation failed: {e}") from e
+                try:
+                    for future in concurrent.futures.as_completed(futures, timeout=180):
+                        try:
+                            if not future.result(timeout=1):
+                                raise RuntimeError(
+                                    "TTS provider did not generate an audio file."
+                                )
+                        except Exception as e:
+                            for pending in futures:
+                                pending.cancel()
+                            raise RuntimeError(f"Audio generation failed: {e}") from e
+                except concurrent.futures.TimeoutError as e:
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(
+                        "TTS generation exceeded 180 seconds; check network/provider status and retry."
+                    ) from e
 
         # Step 5: Build up clips to hit target duration
         if duration == -1:
@@ -624,6 +638,12 @@ def main():
         help="Number of unique phrases to generate (cached and looped to hit 9 minutes)",
     )
     parser.add_argument(
+        "--content-mode",
+        choices=("word", "phrase"),
+        default="phrase",
+        help="Generate individual words or phrases",
+    )
+    parser.add_argument(
         "--output", "-o", type=str, default=None, help="Custom output filename"
     )
     parser.add_argument(
@@ -793,6 +813,7 @@ def main():
         background_image=args.background_image,
         background_music=args.background_music,
         reverse_ratio=reverse_ratio,
+        content_mode=args.content_mode,
     )
 
 

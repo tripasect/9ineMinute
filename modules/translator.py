@@ -1,5 +1,6 @@
 import json
 import re
+import time
 
 from openai import OpenAI
 
@@ -7,13 +8,16 @@ from config import (
     DEFAULT_ORIGIN_LANGUAGE,
     DEFAULT_TARGET_LANGUAGE,
     LANGUAGES,
+    OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
-    PHRASE_MODEL,
+    TEXT_MODEL,
 )
 
 from .cache import ContentCache
 
 MAX_PHRASES_PER_CALL = 20
+LLM_MAX_ATTEMPTS = 3
+LLM_TIMEOUT_SECONDS = 90
 
 # Unicode ranges used to sanity-check that a translation actually uses the
 # expected script for non-Latin target languages.
@@ -40,12 +44,12 @@ class PhraseTranslator:
     Unified phrase generator + translator for the origin/target language pair.
 
     Generates phrases in the origin language and their translations in the
-    target language within a single LLM call using PHRASE_MODEL via
+    target language within a single LLM call using TEXT_MODEL via
     OpenRouter. Batches are capped at MAX_PHRASES_PER_CALL (20) to keep the
     model focused and reduce hallucinated / polluted output.
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str = None):
         # The OpenAI SDK now raises at construction time if api_key is falsy,
         # even though this client may never be used (e.g. --preview mode,
         # which never calls the LLM). Fall back to a placeholder so building
@@ -53,7 +57,9 @@ class PhraseTranslator:
         # without a valid key will simply fail with a normal API error.
         self.client = OpenAI(
             base_url=OPENROUTER_BASE_URL,
-            api_key=api_key or "unset",
+            api_key=api_key or OPENROUTER_API_KEY or "unset",
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=2,
         )
         self.cache = ContentCache()
 
@@ -67,17 +73,17 @@ class PhraseTranslator:
         count: int = 20,
         origin_lang: str = DEFAULT_ORIGIN_LANGUAGE,
         target_lang: str = DEFAULT_TARGET_LANGUAGE,
+        content_mode: str = "phrase",
     ) -> list[dict]:
         """
         Return a list of dicts, each with keys 'origin' and 'target'.
 
-        Results are cached per topic, count, and language pair. Only missing
-        phrase slots trigger an LLM call. The LLM is never asked for more
-        than MAX_PHRASES_PER_CALL phrases at once.
+        Results are cached per topic, count, language pair, and content mode.
+        Only missing slots trigger an LLM call, in bounded batches.
 
         Args:
-            topic: Description of the kind of phrases to generate.
-            count: Total number of phrase pairs to return.
+            topic: Description of the content to generate.
+            count: Total number of translated pairs to return.
             origin_lang: Language code for the source language (default from config).
             target_lang: Language code for the translation language (default from config).
 
@@ -85,7 +91,12 @@ class PhraseTranslator:
             List of {'origin': str, 'target': str} dicts.
         """
         # Load any previously cached pairs for this topic+count key.
-        pairs = self._load_cached_pairs(topic, count, origin_lang, target_lang)
+        content_mode = (content_mode or "phrase").strip().lower()
+        if content_mode not in {"word", "phrase"}:
+            raise ValueError("content_mode must be 'word' or 'phrase'")
+        pairs = self._load_cached_pairs(
+            topic, count, origin_lang, target_lang, content_mode=content_mode
+        )
         if pairs and len(pairs) >= count:
             print(f"  [PhraseTranslator] Loaded {len(pairs)} pairs from cache.")
             return pairs[:count]
@@ -110,6 +121,7 @@ class PhraseTranslator:
                 origin_lang=origin_lang,
                 target_lang=target_lang,
                 exclude=existing_origin | {p["origin"] for p in new_pairs},
+                content_mode=content_mode,
             )
             if not batch:
                 print(
@@ -120,7 +132,10 @@ class PhraseTranslator:
             remaining -= len(batch)
 
         all_pairs = pairs + new_pairs
-        self._save_cached_pairs(topic, count, all_pairs, origin_lang, target_lang)
+        self._save_cached_pairs(
+            topic, count, all_pairs, origin_lang, target_lang,
+            content_mode=content_mode,
+        )
         return all_pairs[:count]
 
     # ------------------------------------------------------------------
@@ -128,16 +143,18 @@ class PhraseTranslator:
     # ------------------------------------------------------------------
 
     def _cache_key(
-        self, topic: str, count: int, origin_lang: str, target_lang: str
+        self, topic: str, count: int, origin_lang: str, target_lang: str,
+        content_mode: str = "phrase",
     ) -> str:
-        return f"__pairs__{origin_lang}_{target_lang}__{topic}_{count}"
+        return f"__{content_mode}s__{origin_lang}_{target_lang}__{topic}_{count}"
 
     def _load_cached_pairs(
-        self, topic: str, count: int, origin_lang: str, target_lang: str
+        self, topic: str, count: int, origin_lang: str, target_lang: str,
+        content_mode: str = "phrase",
     ) -> list[dict]:
-        key = self._cache_key(topic, count, origin_lang, target_lang)
+        key = self._cache_key(topic, count, origin_lang, target_lang, content_mode)
         raw = self.cache.phrases_cache.get(key)
-        if raw is None and origin_lang == "en" and target_lang == "fa":
+        if raw is None and content_mode == "phrase" and origin_lang == "en" and target_lang == "fa":
             # Fall back to the pre-parameterization cache key format.
             raw = self.cache.phrases_cache.get(f"__pairs__{topic}_{count}")
         if not isinstance(raw, list):
@@ -166,8 +183,9 @@ class PhraseTranslator:
         pairs: list[dict],
         origin_lang: str,
         target_lang: str,
+        content_mode: str = "phrase",
     ):
-        key = self._cache_key(topic, count, origin_lang, target_lang)
+        key = self._cache_key(topic, count, origin_lang, target_lang, content_mode)
         normalized = [
             {"origin": p["origin"], "target": p["target"]}
             for p in pairs
@@ -194,19 +212,21 @@ class PhraseTranslator:
         origin_lang: str = DEFAULT_ORIGIN_LANGUAGE,
         target_lang: str = DEFAULT_TARGET_LANGUAGE,
         exclude: set[str] = None,
+        content_mode: str = "phrase",
     ) -> list[dict]:
         """
-        Ask the LLM for `count` origin+target phrase pairs.
+        Ask the LLM for `count` origin+target content pairs.
         Returns a list of validated {'origin', 'target'} dicts.
         """
         origin_name = LANGUAGES.get(origin_lang, {}).get("name", origin_lang)
         target_name = LANGUAGES.get(target_lang, {}).get("name", target_lang)
+        item = "word" if content_mode == "word" else "phrase"
 
         exclusion_note = ""
         if exclude:
             sample = list(exclude)[:10]
             exclusion_note = (
-                f"\nDo NOT repeat these already-used phrases: "
+                f"\nDo NOT repeat these already-used items: "
                 + ", ".join(f'"{e}"' for e in sample)
                 + ("..." if len(exclude) > 10 else "")
             )
@@ -217,21 +237,31 @@ class PhraseTranslator:
             'with exactly two keys: "origin" and "target". '
             f'The "target" value must be a clean, idiomatic {target_name} translation '
             "with NO extra commentary, bullet points, asterisks, or analysis — "
-            "just the translated sentence."
+            + ("just the translated word or collocation." if item == "word" else "just the translated sentence.")
+            + (
+                " Treat each origin value as one vocabulary item. It may be a single word or a short, natural multiword unit such as a collocation or adjective+noun pair when the topic calls for it. Keep the entire unit together in one origin/target pair; never split it into separate entries."
+                if item == "word"
+                else ""
+            )
         )
 
         user_msg = (
-            f"Generate exactly {count} practical, conversational {origin_name} phrases "
+            f"Generate exactly {count} useful {origin_name} {item}s "
             f"suitable for language learners (topic: {topic}). "
-            f"For each phrase provide its {target_name} translation.{exclusion_note}\n\n"
+            + (
+                "Each requested word item may be a single word or a short collocation / adjective+noun pair if that best fits the topic. Preserve each multiword unit together as one item and translate the full unit. "
+                if item == "word"
+                else ""
+            )
+            + f"For each {item} provide its {target_name} translation.{exclusion_note}\n\n"
             "Return ONLY a JSON array like:\n"
             '[\n  {"origin": "...", "target": "..."},\n  ...\n]'
         )
 
-        for attempt in range(3):
+        for attempt in range(LLM_MAX_ATTEMPTS):
             try:
                 response = self.client.chat.completions.create(
-                    model=PHRASE_MODEL,
+                    model=TEXT_MODEL,
                     messages=[
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": user_msg},
@@ -262,6 +292,8 @@ class PhraseTranslator:
                 )
             except Exception as exc:
                 print(f"  [PhraseTranslator] Attempt {attempt + 1} error: {exc}")
+                if attempt + 1 < LLM_MAX_ATTEMPTS:
+                    time.sleep(min(2 ** attempt, 8))
 
         return []
 
@@ -320,8 +352,6 @@ class PersianTranslator:
     """
 
     def __init__(self):
-        from config import OPENROUTER_API_KEY
-
         self._inner = PhraseTranslator(api_key=OPENROUTER_API_KEY)
         self.cache = self._inner.cache
 

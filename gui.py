@@ -124,6 +124,17 @@ BG_INPUT = "#313244"
 FG = "#cdd6f4"
 MUTED = "#a6adc8"
 ACCENT = "#89b4fa"
+WORD_ACCENT = "#a6e3a1"
+PHRASE_PALETTE = {
+    "background": "#0a0b10",
+    "wave_colors": [(30, 40, 60), (36, 50, 75)],
+    "secondary_text": (120, 180, 255),
+}
+WORD_PALETTE = {
+    "background": "#08130f",
+    "wave_colors": [(18, 55, 42), (28, 82, 58)],
+    "secondary_text": (130, 220, 165),
+}
 OK = "#a6e3a1"
 WARN = "#f9e2af"
 ERR = "#f38ba8"
@@ -153,34 +164,27 @@ TOPICS = [
 LEVELS = ["any level", "A1", "A2", "B1", "B2", "C1"]
 
 ENV_DEFAULTS = {
-    "LLM_BASE_URL": "https://freellmapi.dragon-tail.ir/v1",
-    "LLM_API_KEY": "",
-    "LLM_MODEL": "auto",
     "OPENROUTER_API_KEY": "",
-    "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
-    "TTS_AUDIO_MODEL": "google/gemini-3.1-flash-tts-preview",
-    "TTS_KOKORO_MODEL": "hexgrad/kokoro-82m",
+    "TEXT_MODEL": "deepseek/deepseek-chat-v3-0324",
+    "TTS_ORIGIN_MODEL": "hexgrad/kokoro-82m",
+    "TTS_TRANSLATION_MODEL": "google/gemini-3.1-flash-tts-preview",
 }
 
 ENV_LABELS = {
-    "LLM_BASE_URL": "LLM base URL",
-    "LLM_API_KEY": "LLM API key",
-    "LLM_MODEL": "LLM model",
-    "OPENROUTER_BASE_URL": "OpenRouter base URL",
-    "OPENROUTER_API_KEY": "OpenRouter API key",
-    "TTS_AUDIO_MODEL": "Origin TTS Model",
-    "TTS_KOKORO_MODEL": "Translation TTS Model",
+    "OPENROUTER_API_KEY": "API Key",
+    "TEXT_MODEL": "Text Model",
+    "TTS_ORIGIN_MODEL": "TTS Model (Origin Language)",
+    "TTS_TRANSLATION_MODEL": "TTS Model (Translation Language)",
 }
 
 PROVIDER_SECTIONS = [
-    ("Phrase Generation Provider", ["LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"]),
     (
-        "TTS Generation Provider",
+        "OpenRouter",
         [
-            "OPENROUTER_BASE_URL",
             "OPENROUTER_API_KEY",
-            "TTS_AUDIO_MODEL",
-            "TTS_KOKORO_MODEL",
+            "TEXT_MODEL",
+            "TTS_ORIGIN_MODEL",
+            "TTS_TRANSLATION_MODEL",
         ],
     ),
 ]
@@ -204,7 +208,8 @@ def read_env() -> dict:
 
 
 def write_env(values: dict) -> None:
-    """Merge values into .env, preserving comments and unknown lines."""
+    """Write only the supported provider settings, preserving unrelated lines."""
+    supported = set(ENV_DEFAULTS)
     lines = []
     if os.path.exists(ENV_PATH):
         try:
@@ -217,12 +222,24 @@ def write_env(values: dict) -> None:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
-            if key in values:
+            if key in supported:
                 seen.add(key)
                 updated.append(f'{key}="{values[key]}"')
                 continue
+            if key in {
+                "LLM_BASE_URL",
+                "LLM_API_KEY",
+                "LLM_MODEL",
+                "OPENROUTER_BASE_URL",
+                "TTS_AUDIO_MODEL",
+                "TTS_KOKORO_MODEL",
+                "PHRASE_MODEL",
+            }:
+                continue
         updated.append(line)
     for key, val in values.items():
+        if key not in supported:
+            continue
         if key not in seen:
             updated.append(f'{key}="{val}"')
     with open(ENV_PATH, "w", encoding="utf-8") as f:
@@ -231,11 +248,8 @@ def write_env(values: dict) -> None:
 
 def default_env_values() -> dict:
     values = read_env()
-    # Mirror config.py's API-key defaults so a blank .env still works.
     if not values.get("OPENROUTER_API_KEY"):
         values["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY", "")
-    if not values.get("LLM_API_KEY"):
-        values["LLM_API_KEY"] = os.getenv("LLM_API_KEY", "")
     return values
 
 
@@ -297,6 +311,10 @@ class App:
         self._build_style()
         self._build_menu()
         self._build_ui()
+        self._pipeline_process = None
+        self.root.protocol("WM_DELETE_WINDOW", self._close_app)
+        self.content_mode_var.trace_add("write", self._on_content_mode_changed)
+        self._on_content_mode_changed()
         self._enable_default_previews()
         self._poll_logs()
 
@@ -395,6 +413,12 @@ class App:
         style.map("Settings.TButton", background=[("active", BG_INPUT)])
         style.configure("TCheckbutton", background=BG, foreground=FG, focuscolor=BG)
         style.configure("Horizontal.TScale", background=BG)
+        style.configure("Mode.TRadiobutton", background=BG_ALT, foreground=FG)
+        style.map(
+            "Mode.TRadiobutton",
+            foreground=[("selected", ACCENT)],
+            indicatorcolor=[("selected", ACCENT)],
+        )
 
     # ------------------------------------------------------------------ menu
     def _build_menu(self):
@@ -557,6 +581,21 @@ class App:
             anchor="w", padx=12, pady=(10, 6)
         )
 
+        self.content_mode_var = tk.StringVar(value=g.get("content_mode", "PHRASE"))
+        mode_row = ttk.Frame(left, style="Card.TFrame")
+        mode_row.pack(fill="x", padx=12, pady=(2, 8))
+        ttk.Label(mode_row, text="Content type", width=24, style="Card.TLabel").pack(
+            side="left", anchor="w"
+        )
+        for mode in ("WORD", "PHRASE"):
+            ttk.Radiobutton(
+                mode_row,
+                text=mode.title(),
+                value=mode,
+                variable=self.content_mode_var,
+                style="Mode.TRadiobutton",
+            ).pack(side="left", padx=(0, 12))
+
         self.preset_var = tk.StringVar(value=g.get("preset", PRESETS[0][0]))
         preset_row = self._labeled_row(left, "Length preset")
         preset_cb = ttk.Combobox(
@@ -575,7 +614,7 @@ class App:
         self._labeled_row(left, "Duration (seconds)", self.duration_var, 0, 9999)
 
         self.count_var = tk.IntVar(value=g.get("count", 40))
-        self._labeled_row(left, "Phrase count", self.count_var, 1, 200)
+        self._labeled_row(left, "Item count", self.count_var, 1, 200)
 
         self.topic_var = tk.StringVar(value=g.get("topic", TOPICS[0]))
         self._labeled_row(left, "Topic", self.topic_var, choices=TOPICS)
@@ -1036,6 +1075,56 @@ class App:
     def _on_reverse_slide(self, _value=None):
         self.reverse_label.config(text=f"{self.reverse_var.get():.0%}")
 
+    def _on_content_mode_changed(self, *_args):
+        """Apply matching green or blue colors to the app surface and accents."""
+        is_word = self.content_mode_var.get().strip().upper() == "WORD"
+        accent = WORD_ACCENT if is_word else ACCENT
+        palette = WORD_PALETTE if is_word else PHRASE_PALETTE
+        surface = "#12251d" if is_word else BG
+        card = "#193126" if is_word else BG_ALT
+        inset = "#214233" if is_word else BG_INPUT
+        self.root.configure(bg=surface)
+        if hasattr(self, "status_var"):
+            self.status_bar.configure(bg=card, fg=MUTED)
+        style = ttk.Style(self.root)
+        style.configure(".", background=surface)
+        style.configure("TFrame", background=surface)
+        style.configure("Card.TFrame", background=card)
+        style.configure("TLabel", background=surface)
+        style.configure("Muted.TLabel", background=surface)
+        style.configure("Card.TLabel", background=card)
+        style.configure("Title.TLabel", background=surface)
+        style.configure("Section.TLabel", background=card, foreground=accent)
+        style.configure("TNotebook", background=surface)
+        style.configure("TNotebook.Tab", background=card)
+        style.map("TNotebook.Tab", background=[("selected", inset)])
+        style.configure("TEntry", fieldbackground=inset, bordercolor=inset)
+        style.configure("TCombobox", fieldbackground=inset, background=inset)
+        style.map("TCombobox", fieldbackground=[("readonly", inset)])
+        style.configure("TButton", background=inset, bordercolor=inset)
+        style.configure("Settings.TButton", background=card)
+        style.configure("Mode.TRadiobutton", background=card)
+        style.configure("TCheckbutton", background=surface)
+        style.configure("Horizontal.TScale", background=surface)
+        style.configure("TNotebook.Tab", foreground=MUTED)
+        style.map("TNotebook.Tab", foreground=[("selected", accent)])
+        style.configure(
+            "Accent.TButton", background=accent, bordercolor=accent
+        )
+        style.map("Accent.TButton", background=[("active", accent)])
+        style.configure(
+            "Settings.TButton", foreground=accent, bordercolor=accent
+        )
+        style.map(
+            "Mode.TRadiobutton",
+            foreground=[("selected", accent)],
+            indicatorcolor=[("selected", accent)],
+        )
+        for child in self.root.winfo_children():
+            if isinstance(child, tk.Label):
+                child.configure(bg=surface)
+        self.theme_palette = palette
+
     # ------------------------------------------------------------ run tab
     def _build_run_tab(self):
         tab = self.tab_run
@@ -1120,6 +1209,7 @@ class App:
             font=("Helvetica", 10),
         )
         bar.pack(fill="x", side="bottom")
+        self.status_bar = bar
 
     # ------------------------------------------------------------- actions
     def save_providers(self, show=True, parent=None):
@@ -1147,6 +1237,7 @@ class App:
             "preset": self.preset_var.get(),
             "duration": int(self.duration_var.get()),
             "count": int(self.count_var.get()),
+            "content_mode": self.content_mode_var.get(),
             "topic": self.topic_var.get().strip(),
             "level": self.level_var.get(),
             "origin_lang": self.origin_var.get(),
@@ -1181,6 +1272,11 @@ class App:
 
     def _video_settings_dict(self) -> dict:
         g = self.collect_content()
+        palette = (
+            WORD_PALETTE
+            if g.get("content_mode", "PHRASE").upper() == "WORD"
+            else PHRASE_PALETTE
+        )
         vs = {}
         for key in (
             "width",
@@ -1199,6 +1295,20 @@ class App:
         if g["background_image"]:
             vs["background_image"] = g["background_image"]
         vs["output_dir"] = g["output_dir"]
+        vs["background_color"] = tuple(
+            int(palette["background"].lstrip("#")[i : i + 2], 16)
+            for i in (0, 2, 4)
+        )
+        vs["background_tint"] = (
+            (25, 125, 75, 70)
+            if g.get("content_mode", "PHRASE").upper() == "WORD"
+            else (45, 90, 175, 55)
+        )
+        vs["wave_colors"] = palette["wave_colors"]
+        vs["text_colors"] = {
+            "primary": (245, 245, 247),
+            "secondary": palette["secondary_text"],
+        }
         return vs
 
     def generate(self):
@@ -1208,6 +1318,8 @@ class App:
             return
 
         g = self.collect_content()
+        if not g.get("content_mode"):
+            g["content_mode"] = "PHRASE"
         origin = g["origin_lang"]
         target = g["target_lang"]
         for code, label in (("origin", origin), ("target", target)):
@@ -1252,6 +1364,8 @@ class App:
         )
 
         args = [
+            "--content-mode",
+            g["content_mode"].lower(),
             "--topic",
             topic,
             "--count",
@@ -1355,16 +1469,30 @@ class App:
                     errors="replace",
                     creationflags=CREATE_NO_WINDOW,
                 )
+                self._pipeline_process = proc
                 for line in proc.stdout:
                     self.log_queue.put(line.rstrip())
                 proc.wait()
+                self._pipeline_process = None
                 self.log_queue.put(None)
                 self.log_queue.put(("done", proc.returncode))
             except Exception as e:
+                self._pipeline_process = None
                 self.log_queue.put(None)
                 self.log_queue.put(("error", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _close_app(self):
+        """Terminate an active child pipeline before closing the GUI."""
+        proc = self._pipeline_process
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self.root.destroy()
 
     def _poll_logs(self):
         try:

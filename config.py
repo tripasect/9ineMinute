@@ -18,21 +18,16 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # working directory (which may differ when launched from Finder/subprocess).
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-LLM_CONFIG: dict = {
-    "base_url": os.getenv("LLM_BASE_URL", "https://freellmapi.dragon-tail.ir/v1"),
-    "api_key": os.getenv(
-        "LLM_API_KEY", "freellmapi-f0d2a6fe0e87bf3d5ea87a00a8fb4c530f98ebedd7fb8e0a"
-    ),
-    "model": os.getenv("LLM_MODEL", "auto"),
-}
-
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL: str = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
-PHRASE_MODEL: str = os.getenv("PHRASE_MODEL", "deepseek-v4-flash")
-TTS_AUDIO_MODEL: str = os.getenv(
-    "TTS_AUDIO_MODEL", "google/gemini-3.1-flash-tts-preview"
+TEXT_MODEL: str = os.getenv("TEXT_MODEL", "deepseek/deepseek-chat-v3-0324")
+TTS_ORIGIN_MODEL: str = os.getenv(
+    "TTS_ORIGIN_MODEL", "hexgrad/kokoro-82m"
+)
+TTS_TRANSLATION_MODEL: str = os.getenv(
+    "TTS_TRANSLATION_MODEL", "google/gemini-3.1-flash-tts-preview"
 )
 
 VIDEO_SETTINGS: dict = {
@@ -57,15 +52,12 @@ VIDEO_SETTINGS: dict = {
 
 REVERSE_RATIO: float = 0.15
 
-TTS_KOKORO_MODEL: str = os.getenv("TTS_KOKORO_MODEL", "hexgrad/kokoro-82m")
-
-
 LANGUAGES = {
     "en": {
         "name": "English",
         "direction": "ltr",
         "voice": "af_sky",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "origin",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     },
@@ -73,7 +65,7 @@ LANGUAGES = {
         "name": "Persian (Farsi)",
         "direction": "rtl",
         "voice": "Zephyr",
-        "tts_model": TTS_AUDIO_MODEL,
+        "tts_role": "translation",
         "tts_format": "pcm",
         "font": "opensourcefont.ttf",
     },
@@ -81,7 +73,7 @@ LANGUAGES = {
         "name": "Arabic",
         "direction": "rtl",
         "voice": "Zephyr",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "opensourcefont.ttf",
     },
@@ -89,7 +81,7 @@ LANGUAGES = {
         "name": "Spanish",
         "direction": "ltr",
         "voice": "ef_dora",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     },
@@ -97,7 +89,7 @@ LANGUAGES = {
         "name": "French",
         "direction": "ltr",
         "voice": "ff_siwis",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     },
@@ -105,7 +97,7 @@ LANGUAGES = {
         "name": "German",
         "direction": "ltr",
         "voice": "af_sky",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     },
@@ -113,7 +105,7 @@ LANGUAGES = {
         "name": "Hindi",
         "direction": "ltr",
         "voice": "hf_alpha",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
     },
@@ -121,7 +113,7 @@ LANGUAGES = {
         "name": "Japanese",
         "direction": "ltr",
         "voice": "jf_alpha",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Hiragino Sans GB.ttc",
     },
@@ -129,7 +121,7 @@ LANGUAGES = {
         "name": "Chinese",
         "direction": "ltr",
         "voice": "zf_xiaobei",
-        "tts_model": TTS_KOKORO_MODEL,
+        "tts_role": "translation",
         "tts_format": "mp3",
         "font": "/System/Library/Fonts/Hiragino Sans GB.ttc",
     },

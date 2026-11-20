@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 
 import requests
 
@@ -7,22 +8,28 @@ from config import (
     LANGUAGES,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
-    TTS_AUDIO_MODEL,
-    TTS_KOKORO_MODEL,
+    TTS_ORIGIN_MODEL,
+    TTS_TRANSLATION_MODEL,
 )
 from runtime import resolve_binary
 
 from modules.cache import ContentCache
 
+TTS_MAX_ATTEMPTS = 3
+TTS_REQUEST_TIMEOUT = (10, 45)
+FFMPEG_TIMEOUT_SECONDS = 60
+
 
 class OpenRouterAudioGenerator:
     """TTS using OpenRouter API."""
 
-    def __init__(self, temp_dir: str = "temp"):
+    def __init__(self, temp_dir: str = "temp", origin_language: str = "en"):
         self.temp_dir = temp_dir
         os.makedirs(temp_dir, exist_ok=True)
         self.api_key = OPENROUTER_API_KEY
-        self.model = TTS_AUDIO_MODEL
+        self.origin_model = TTS_ORIGIN_MODEL
+        self.translation_model = TTS_TRANSLATION_MODEL
+        self.origin_language = origin_language
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -55,7 +62,13 @@ class OpenRouterAudioGenerator:
             output_path,
         ]
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+            )
         except Exception as e:
             print(f"  [TTS] Fallback silent audio generation failed: {e}")
 
@@ -82,12 +95,8 @@ class OpenRouterAudioGenerator:
             print(f"  [TTS] Loaded audio from cache for: '{text[:25]}...' ({language})")
             return True
 
-        api_key = (
-            os.getenv("OPENROUTER_API_KEY", "").strip()
-            or os.getenv("LLM_API_KEY", "").strip()
-            or self.api_key
-        )
-        base_url = os.getenv("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip() or self.api_key
+        base_url = OPENROUTER_BASE_URL
         url = f"{base_url.rstrip('/')}/audio/speech"
 
         if not api_key:
@@ -103,7 +112,11 @@ class OpenRouterAudioGenerator:
         # Resolve TTS model, voice and response format from the language
         # catalog, falling back to Kokoro + MP3 for unknown languages.
         lang_cfg = LANGUAGES.get(language, {})
-        model = lang_cfg.get("tts_model", TTS_KOKORO_MODEL)
+        model = (
+            self.origin_model
+            if language == self.origin_language
+            else self.translation_model
+        )
         voice = lang_cfg.get("voice", "af_sky")
         response_format = "pcm" if lang_cfg.get("tts_format") == "pcm" else "mp3"
         is_gemini = response_format == "pcm"
@@ -119,9 +132,22 @@ class OpenRouterAudioGenerator:
             print(
                 f"  [TTS] Cache miss. Generating {language} audio for: '{text[:30]}...' using {model}"
             )
-            response = requests.post(
-                url, headers=headers, json=payload, stream=True, timeout=30
-            )
+            response = None
+            for attempt in range(TTS_MAX_ATTEMPTS):
+                try:
+                    response = requests.post(
+                        url, headers=headers, json=payload, stream=True,
+                        timeout=TTS_REQUEST_TIMEOUT,
+                    )
+                    if response.status_code < 500 and response.status_code != 429:
+                        break
+                    if attempt + 1 < TTS_MAX_ATTEMPTS:
+                        response.close()
+                        time.sleep(2 ** attempt)
+                except requests.RequestException:
+                    if attempt + 1 == TTS_MAX_ATTEMPTS:
+                        raise
+                    time.sleep(2 ** attempt)
 
             if response.status_code != 200:
                 print(
@@ -132,10 +158,13 @@ class OpenRouterAudioGenerator:
 
             # Save raw bytes
             temp_pcm_path = output_path + ".raw" if is_gemini else output_path
-            with open(temp_pcm_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+            try:
+                with open(temp_pcm_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            finally:
+                response.close()
 
             # If we downloaded raw PCM (Gemini), convert it to standard MP3 using FFmpeg
             if is_gemini:
@@ -157,11 +186,14 @@ class OpenRouterAudioGenerator:
                     output_path,
                 ]
                 try:
-                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    subprocess.run(
+                        cmd, capture_output=True, text=True, check=True,
+                        timeout=FFMPEG_TIMEOUT_SECONDS,
+                    )
                     if os.path.exists(temp_pcm_path):
                         os.remove(temp_pcm_path)
-                except subprocess.CalledProcessError as e:
-                    print(f"  [TTS] FFmpeg PCM convert error: {e.stderr}")
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    print(f"  [TTS] FFmpeg PCM convert error: {getattr(e, 'stderr', None) or e}")
                     self._create_silent_fallback(output_path)
                     return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 

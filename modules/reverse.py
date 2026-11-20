@@ -1,6 +1,7 @@
-from config import LLM_CONFIG, REVERSE_RATIO
+from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, REVERSE_RATIO, TEXT_MODEL
 from openai import OpenAI
 import random
+import time
 
 
 class ReverseTranslator:
@@ -8,8 +9,10 @@ class ReverseTranslator:
     
     def __init__(self):
         self.client = OpenAI(
-            base_url=LLM_CONFIG["base_url"],
-            api_key=LLM_CONFIG["api_key"]
+            base_url=OPENROUTER_BASE_URL,
+            api_key=OPENROUTER_API_KEY or "unset",
+            timeout=90,
+            max_retries=2,
         )
     
     def reverse_translate(self, text: str, source_lang: str = "English") -> str:
@@ -18,13 +21,18 @@ class ReverseTranslator:
         Return ONLY the phrase, nothing else.
         Text: {text}"""
         
-        response = self.client.chat.completions.create(
-            model=LLM_CONFIG["model"],
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        
-        return response.choices[0].message.content.strip()
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(
+                    model=TEXT_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
     
     def generate_reverse_segments(
         self,

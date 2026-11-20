@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 from typing import Dict, List, Optional
 
 from PIL import Image, ImageDraw, ImageFont
@@ -12,6 +13,9 @@ if sys.platform == "win32":
     CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 else:
     CREATE_NO_WINDOW = 0
+
+FFPROBE_TIMEOUT_SECONDS = 20
+FFMPEG_TIMEOUT_SECONDS = 180
 
 from config import BASE_DIR, LANGUAGES, OUTPUT_DIR, TEMP_DIR, VIDEO_SETTINGS
 from runtime import bundle_dir, resolve_binary
@@ -161,7 +165,8 @@ class VideoMuxer:
         ]
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+                cmd, capture_output=True, text=True, check=True,
+                creationflags=CREATE_NO_WINDOW, timeout=FFPROBE_TIMEOUT_SECONDS,
             )
             return float(result.stdout.strip())
         except Exception as e:
@@ -173,6 +178,7 @@ class VideoMuxer:
     ):
         """Draws two overlapping, beautiful, and slowly moving waves at the bottom of the canvas."""
         wave_colors = self.settings.get("wave_colors", [(30, 40, 60), (36, 50, 75)])
+        wave_colors = [tuple(color) if isinstance(color, list) else color for color in wave_colors]
         w, h = self.width, self.height
         safe_total = max(total_frames_global, 1)
 
@@ -221,6 +227,8 @@ class VideoMuxer:
     ) -> Image.Image:
         """Generates a single frame with text (fades in at clip edges) and moving waves or a background image."""
         bg_color = self.settings.get("background_color", (10, 11, 16))
+        if isinstance(bg_color, list):
+            bg_color = tuple(bg_color)
         w, h = self.width, self.height
         img = Image.new("RGBA", (w, h), color=bg_color)
         draw = ImageDraw.Draw(img)
@@ -228,6 +236,12 @@ class VideoMuxer:
         # Background: either a preloaded image or animated calming waves
         if self._background_image is not None:
             img.paste(self._background_image, (0, 0))
+            tint = self.settings.get("background_tint")
+            if tint:
+                tint_layer = Image.new(
+                    "RGBA", (w, h), tuple(tint[:3]) + (int(tint[3]),)
+                )
+                img = Image.alpha_composite(img, tint_layer)
             draw = ImageDraw.Draw(img)
         else:
             self.draw_calming_waves(draw, current_frame_global, total_frames_global)
@@ -437,6 +451,13 @@ class VideoMuxer:
                 stderr=subprocess.DEVNULL,
                 creationflags=CREATE_NO_WINDOW,
             )
+            timed_out = threading.Event()
+            watchdog = threading.Timer(
+                FFMPEG_TIMEOUT_SECONDS,
+                lambda: (timed_out.set(), process.kill() if process.poll() is None else None),
+            )
+            watchdog.daemon = True
+            watchdog.start()
 
             # Write frames directly to pipe
             for f_idx_in_clip in range(total_frames_in_clip):
@@ -462,11 +483,23 @@ class VideoMuxer:
                     break  # Exit loop if pipe is broken
 
             process.stdin.close()
-            process.wait()
+            process.wait(timeout=FFMPEG_TIMEOUT_SECONDS)
             return process.returncode == 0
+        except subprocess.TimeoutExpired as e:
+            if "process" in locals() and process.poll() is None:
+                process.kill()
+                process.wait()
+            print(f"  [Error] FFmpeg clip encode timed out after {FFMPEG_TIMEOUT_SECONDS}s.")
+            return False
         except Exception as e:
+            if "process" in locals() and process.poll() is None:
+                process.kill()
+                process.wait()
             print(f"  [Error] Failed to pipe video clip: {e}")
             return False
+        finally:
+            if "watchdog" in locals():
+                watchdog.cancel()
 
     def create_silence_clip(
         self,
@@ -528,6 +561,13 @@ class VideoMuxer:
                 stderr=subprocess.DEVNULL,
                 creationflags=CREATE_NO_WINDOW,
             )
+            timed_out = threading.Event()
+            watchdog = threading.Timer(
+                FFMPEG_TIMEOUT_SECONDS,
+                lambda: (timed_out.set(), process.kill() if process.poll() is None else None),
+            )
+            watchdog.daemon = True
+            watchdog.start()
 
             # Write frames, passing global frame info for continuous wave animation
             for f_idx_in_clip in range(total_frames_in_clip):
@@ -546,11 +586,23 @@ class VideoMuxer:
                 process.stdin.write(img.tobytes())
 
             process.stdin.close()
-            process.wait()
+            process.wait(timeout=FFMPEG_TIMEOUT_SECONDS)
             return process.returncode == 0
+        except subprocess.TimeoutExpired:
+            if "process" in locals() and process.poll() is None:
+                process.kill()
+                process.wait()
+            print(f"  [Error] FFmpeg silence encode timed out after {FFMPEG_TIMEOUT_SECONDS}s.")
+            return False
         except Exception as e:
+            if "process" in locals() and process.poll() is None:
+                process.kill()
+                process.wait()
             print(f"  [Error] Failed to create silence clip: {e}")
             return False
+        finally:
+            if "watchdog" in locals():
+                watchdog.cancel()
 
     def _get_duration(self, file_path: str) -> float:
         cmd = [
@@ -565,7 +617,8 @@ class VideoMuxer:
         ]
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+                cmd, capture_output=True, text=True, check=True,
+                creationflags=CREATE_NO_WINDOW, timeout=FFPROBE_TIMEOUT_SECONDS,
             )
             return float(result.stdout.strip())
         except Exception:
@@ -624,7 +677,8 @@ class VideoMuxer:
 
         try:
             subprocess.run(
-                concat_cmd, capture_output=True, text=True, check=True, creationflags=CREATE_NO_WINDOW
+                concat_cmd, capture_output=True, text=True, check=True,
+                creationflags=CREATE_NO_WINDOW, timeout=FFMPEG_TIMEOUT_SECONDS,
             )
         except subprocess.CalledProcessError as e:
             print(f"  [Error] FFmpeg concat failed: {e.stderr}")
@@ -686,9 +740,14 @@ class VideoMuxer:
                 stderr=subprocess.DEVNULL,
                 check=True,
                 creationflags=CREATE_NO_WINDOW,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
             )
             print(f"  [Muxer] Completed final video with global fade-in/out.")
             return final_output_path
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"FFmpeg exceeded its {FFMPEG_TIMEOUT_SECONDS}s time limit while assembling the video."
+            ) from e
         except subprocess.CalledProcessError as e:
             print(f"  [Warning] Audio re-encode with fades failed: {e.stderr}")
             if os.path.exists(temp_merged_video):
