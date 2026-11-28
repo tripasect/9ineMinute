@@ -300,9 +300,8 @@ class ContentPipeline:
             else:
                 print(f"  Launching {len(audio_tasks)} audio generation tasks...")
 
-            # Preview deliberately uses real TTS so it is an accurate sample
-            # of a regular run. A failed request must stop generation instead
-            # of allowing fallback/silent audio to produce a false success.
+            # Preview requests fresh real TTS, then substitutes silence for
+            # any failed item just like a regular run.
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 future_tasks = {
                     executor.submit(
@@ -311,23 +310,27 @@ class ContentPipeline:
                         lang,
                         path,
                         use_cache=not self.preview,
-                    ): (text, lang)
+                    ): (text, lang, path)
                     for text, lang, path in audio_tasks
                 }
                 futures = list(future_tasks)
                 try:
                     for future in concurrent.futures.as_completed(futures, timeout=180):
+                        text, lang, path = future_tasks[future]
                         try:
                             if not future.result(timeout=1):
-                                text, lang = future_tasks[future]
-                                raise RuntimeError(
-                                    f"TTS failed for {lang} audio '{text[:40]}'. "
-                                    "See the provider error above and check the selected model/voice."
-                                )
+                                raise RuntimeError("TTS worker returned no audio.")
                         except Exception as e:
-                            for pending in futures:
-                                pending.cancel()
-                            raise RuntimeError(f"Audio generation failed: {e}") from e
+                            print(
+                                f"  [TTS Warning] Could not generate {lang} audio "
+                                f"for '{text[:40]}': {e}. Using silence for this item."
+                            )
+                            if not self.audio_gen.generate_silent_audio(path):
+                                raise RuntimeError(
+                                    f"TTS failed for {lang} audio '{text[:40]}' and "
+                                    "a silent fallback could not be created."
+                                ) from e
+                            print(f"  [TTS] Created silent fallback for {lang} item.")
                 except concurrent.futures.TimeoutError as e:
                     for pending in futures:
                         pending.cancel()
@@ -802,22 +805,26 @@ def main():
         settings=settings,
         preview=preview_mode,
     )
-    pipeline.run(
-        topic=args.topic,
-        count=args.count,
-        output_filename=args.output,
-        duration=args.duration,
-        repeat_english=args.repeat,
-        repetitions=args.repetitions,
-        target_repetitions=args.target_repetitions,
-        custom_phrases_file=args.custom_phrases,
-        origin_language=args.origin_lang,
-        target_language=args.target_lang,
-        background_image=args.background_image,
-        background_music=args.background_music,
-        reverse_ratio=reverse_ratio,
-        content_mode=args.content_mode,
-    )
+    try:
+        pipeline.run(
+            topic=args.topic,
+            count=args.count,
+            output_filename=args.output,
+            duration=args.duration,
+            repeat_english=args.repeat,
+            repetitions=args.repetitions,
+            target_repetitions=args.target_repetitions,
+            custom_phrases_file=args.custom_phrases,
+            origin_language=args.origin_lang,
+            target_language=args.target_lang,
+            background_image=args.background_image,
+            background_music=args.background_music,
+            reverse_ratio=reverse_ratio,
+            content_mode=args.content_mode,
+        )
+    except Exception as exc:
+        print(f"\n[Pipeline failed] {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

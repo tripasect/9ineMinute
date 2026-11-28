@@ -16,11 +16,16 @@ from runtime import resolve_binary
 
 from modules.cache import ContentCache
 
-TTS_MAX_ATTEMPTS = 3
+TTS_MAX_ATTEMPTS = 5
 TTS_REQUEST_TIMEOUT = (10, 45)
 FFMPEG_TIMEOUT_SECONDS = 60
+MAX_RETRY_BACKOFF_SECONDS = 15
 KOKORO_LANGUAGES = {"en", "es", "fr", "hi", "ja", "zh"}
 GEMINI_VOICE = "Zephyr"
+
+
+class TTSGenerationError(RuntimeError):
+    """Provider or audio conversion failure with actionable details."""
 
 
 class OpenRouterAudioGenerator:
@@ -103,10 +108,21 @@ class OpenRouterAudioGenerator:
                 except OSError:
                     pass
 
-    def _fail_audio(self, output_path: str, message: str, *temporary_paths) -> bool:
+    def _fail_audio(self, output_path: str, message: str, *temporary_paths):
         print(f"  [TTS] Failed: {message}")
         self._remove_partial_audio(output_path, *temporary_paths)
-        return False
+        raise TTSGenerationError(message)
+
+    @staticmethod
+    def _retry_delay(response, attempt: int) -> float:
+        """Honor Retry-After when available; otherwise use bounded backoff."""
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        if retry_after:
+            try:
+                return min(float(retry_after), MAX_RETRY_BACKOFF_SECONDS)
+            except (TypeError, ValueError):
+                pass
+        return min(2 ** attempt, MAX_RETRY_BACKOFF_SECONDS)
 
     def generate_silent_audio(self, output_path: str, duration: float = 1.5) -> bool:
         """Create a local silent MP3 with zero network/API calls (used by --preview)."""
@@ -220,12 +236,22 @@ class OpenRouterAudioGenerator:
                         if response.status_code < 500 and response.status_code != 429:
                             break
                         if attempt + 1 < TTS_MAX_ATTEMPTS:
+                            delay = self._retry_delay(response, attempt)
+                            print(
+                                f"  [TTS] Temporary HTTP {response.status_code}; "
+                                f"retrying in {delay:g}s ({attempt + 1}/{TTS_MAX_ATTEMPTS})."
+                            )
                             response.close()
-                            time.sleep(2 ** attempt)
-                    except requests.RequestException:
+                            time.sleep(delay)
+                    except requests.RequestException as exc:
                         if attempt + 1 == TTS_MAX_ATTEMPTS:
                             raise
-                        time.sleep(2 ** attempt)
+                        delay = min(2 ** attempt, MAX_RETRY_BACKOFF_SECONDS)
+                        print(
+                            f"  [TTS] Network error ({exc}); retrying in {delay:g}s "
+                            f"({attempt + 1}/{TTS_MAX_ATTEMPTS})."
+                        )
+                        time.sleep(delay)
 
                 if response is None:
                     return self._fail_audio(output_path, "No response from TTS provider.")
@@ -304,5 +330,7 @@ class OpenRouterAudioGenerator:
                 return True
 
             return self._fail_audio(output_path, "Provider returned an empty audio file.", temp_pcm_path)
+        except TTSGenerationError:
+            raise
         except Exception as e:
             return self._fail_audio(output_path, str(e), locals().get("temp_pcm_path"))
